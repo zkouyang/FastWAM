@@ -128,6 +128,20 @@ docs/_build/
 target/
 
 # Third party
+/third_party/sam3/
+/third_party/grounding_dino_torch27/gdino_checkpoints/
+/third_party/grounding_dino_torch27/grounding_dino/.asset/
+/third_party/grounding_dino_torch27/grounding_dino/demo/
+/third_party/grounding_dino_torch27/grounding_dino/Dockerfile
+/third_party/grounding_dino_torch27/grounding_dino/environment.yaml
+/third_party/grounding_dino_torch27/**/build/
+/third_party/grounding_dino_torch27/**/*.egg-info/
+/third_party/grounding_dino_torch27/**/*.so
+!third_party/grounding_dino_torch27/grounding_dino/requirements.txt
+
+# Local papers / notes
+/SSI/*.pdf
+
 # Jupyter Notebook
 .ipynb_checkpoints
 
