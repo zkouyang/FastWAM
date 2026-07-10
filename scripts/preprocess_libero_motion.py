@@ -230,16 +230,15 @@ class MotionAnnotator:
         self.var_threshold = var_threshold
         self.model: Any | None = None
 
-        if backend in {"none", "opencv"}:
-            return
-        if backend == "cotracker3":
+        if backend in {"cotracker2", "cotracker3"}:
             try:
                 import torch
             except Exception as exc:  # pragma: no cover
-                raise ImportError("CoTracker3 backend requires torch.") from exc
+                raise ImportError(f"Motion backend '{backend}' requires torch.") from exc
 
             source = "local" if Path(repo_or_dir).exists() else "github"
-            self.model = torch.hub.load(repo_or_dir, "cotracker3_offline", source=source)
+            hub_entry = "cotracker2" if backend == "cotracker2" else "cotracker3_offline"
+            self.model = torch.hub.load(repo_or_dir, hub_entry, source=source)
             self.model = self.model.to(torch.device(device))
             self.model.eval()
             return
@@ -255,28 +254,8 @@ class MotionAnnotator:
             motion_point_source: [N], 0=grid, 1=random_dynamic
         """
 
-        t, height, width = frames.shape[:3]
-
-        if self.backend == "none":
-            n_grid_points = 2 * self.grid_size * self.grid_size
-            n_points = n_grid_points + self.num_random_points
-            tracks = np.zeros((t, n_points, 2), dtype=np.float32)
-            visibility = np.zeros((t, n_points), dtype=np.float32)
-            point_source = np.concatenate(
-                [
-                    np.zeros((n_grid_points,), dtype=np.int16),
-                    np.ones((self.num_random_points,), dtype=np.int16),
-                ],
-                axis=0,
-            )
-            return tracks.astype(np.float16), visibility.astype(np.float16), point_source
-
-        if self.backend == "opencv":
-            init_points = double_grid_points((height, width), self.grid_size)
-            point_source = np.zeros((len(init_points),), dtype=np.int16)
-            tracks, visibility = opencv_point_tracks(frames, init_points)
-        else:
-            tracks, visibility, point_source = self._cotracker_atm_style_tracks(frames)
+        _t, height, width = frames.shape[:3]
+        tracks, visibility, point_source = self._cotracker_atm_style_tracks(frames)
 
         tracks_norm = tracks.astype(np.float32)
         tracks_norm[..., 0] /= max(width - 1, 1)
@@ -387,43 +366,6 @@ def double_grid_points(image_hw: tuple[int, int], grid_size: int) -> np.ndarray:
     )
 
 
-def opencv_point_tracks(clip: np.ndarray, points: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """Sparse LK fallback for smoke tests; CoTracker3 should be used for real labels."""
-
-    t, _h, _w = clip.shape[:3]
-    n = len(points)
-    tracks = np.zeros((t, n, 2), dtype=np.float32)
-    vis = np.zeros((t, n), dtype=np.float32)
-    tracks[0] = points
-    vis[0] = 1.0
-
-    prev_gray = cv2.cvtColor(clip[0], cv2.COLOR_RGB2GRAY)
-    prev_points = points.reshape(-1, 1, 2)
-    alive = np.ones(n, dtype=bool)
-    for ti in range(1, t):
-        gray = cv2.cvtColor(clip[ti], cv2.COLOR_RGB2GRAY)
-        nxt, status, _err = cv2.calcOpticalFlowPyrLK(
-            prev_gray,
-            gray,
-            prev_points,
-            None,
-            winSize=(21, 21),
-            maxLevel=3,
-            criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.01),
-        )
-        if nxt is None or status is None:
-            nxt = prev_points.copy()
-            status = np.zeros((n, 1), dtype=np.uint8)
-        status = status.reshape(-1).astype(bool)
-        alive &= status
-        cur = nxt.reshape(-1, 2)
-        tracks[ti] = cur
-        vis[ti] = alive.astype(np.float32)
-        prev_gray = gray
-        prev_points = cur.reshape(-1, 1, 2)
-    return tracks, vis
-
-
 def write_manifest_row(path: Path, row: dict[str, Any]) -> None:
     with path.open("a", encoding="utf-8") as f:
         f.write(json.dumps(row, ensure_ascii=False) + "\n")
@@ -436,7 +378,7 @@ def make_trajectory_vis_frames(
     frame_indices: np.ndarray,
     *,
     max_tracks: int,
-    trail: int = 12,
+    future_frames: int,
 ) -> list[np.ndarray]:
     if motion_points.shape[1] == 0:
         return [frames[int(i)].copy() for i in frame_indices]
@@ -455,11 +397,11 @@ def make_trajectory_vis_frames(
     for frame_idx in frame_indices:
         ti = int(frame_idx)
         canvas = frames[ti].copy()
-        start = max(0, ti - trail)
+        end = min(ti + future_frames + 1, motion_points.shape[0])
         for pi, track_idx in enumerate(track_indices):
             color = tuple(int(x) for x in palette[pi])
-            pts = motion_points[start : ti + 1, track_idx].astype(np.float32)
-            vis = motion_visibility[start : ti + 1, track_idx] > 0.5
+            pts = motion_points[ti:end, track_idx].astype(np.float32)
+            vis = motion_visibility[ti:end, track_idx] > 0.5
             if not vis.any():
                 continue
             xy = pts.copy()
@@ -475,8 +417,8 @@ def make_trajectory_vis_frames(
                 if prev is not None:
                     cv2.line(canvas, prev, cur, color, 1, cv2.LINE_AA)
                 prev = cur
-            if vis[-1]:
-                cv2.circle(canvas, (int(xy[-1, 0]), int(xy[-1, 1])), 2, color, -1, cv2.LINE_AA)
+            if vis[0]:
+                cv2.circle(canvas, (int(xy[0, 0]), int(xy[0, 1])), 2, color, -1, cv2.LINE_AA)
         out.append(canvas)
     return out
 
@@ -530,6 +472,7 @@ def save_episode_visualizations(
     fps: int,
     max_frames: int,
     max_tracks: int,
+    future_frames: int,
 ) -> None:
     task_dir = vis_root / ep.suite / slugify(ep.task) / f"episode_{ep.episode_index:06d}"
     task_dir.mkdir(parents=True, exist_ok=True)
@@ -549,6 +492,7 @@ def save_episode_visualizations(
                 motion_vis_all[cam_idx],
                 vis_frame_indices,
                 max_tracks=max_tracks,
+                future_frames=future_frames,
             ),
             cam_dir / "trajectory.mp4",
             fps,
@@ -569,6 +513,7 @@ def process_episode(
     visualization_fps: int,
     visualization_max_frames: int,
     visualization_max_tracks: int,
+    visualization_future_frames: int,
 ) -> dict[str, Any]:
     suite_out = output_root / ep.suite
     suite_out.mkdir(parents=True, exist_ok=True)
@@ -618,7 +563,7 @@ def process_episode(
         "image_size": image_size,
         "frame_stride": frame_stride,
         "motion_backend": motion_annotator.backend,
-        "motion_sampling": "atm_random_plus_grid" if motion_annotator.backend == "cotracker3" else f"{motion_annotator.backend}_fallback",
+        "motion_sampling": "atm_random_plus_grid",
         "motion_num_random_points": motion_annotator.num_random_points,
         "motion_grid_size": motion_annotator.grid_size,
         "motion_num_points": int(motion_points_all[0].shape[1]),
@@ -651,6 +596,7 @@ def process_episode(
             fps=visualization_fps,
             max_frames=visualization_max_frames,
             max_tracks=visualization_max_tracks,
+            future_frames=visualization_future_frames,
         )
 
     return {
@@ -681,7 +627,7 @@ def build_argparser() -> argparse.ArgumentParser:
 
     parser.add_argument("--image-size", type=int, default=224, help="Per-camera teacher input resolution.")
     parser.add_argument("--frame-stride", type=int, default=1, help="Frame stride for frame_indices and visualization.")
-    parser.add_argument("--motion-backend", choices=["cotracker3", "opencv", "none"], default="cotracker3")
+    parser.add_argument("--motion-backend", choices=["cotracker3", "cotracker2"], default="cotracker3")
     parser.add_argument("--cotracker-repo-or-dir", default="facebookresearch/co-tracker")
     parser.add_argument("--motion-num-random-points", type=int, default=1000)
     parser.add_argument("--motion-grid-size", type=int, default=7)
@@ -692,6 +638,12 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.add_argument("--vis-fps", type=int, default=10)
     parser.add_argument("--vis-max-frames", type=int, default=48)
     parser.add_argument("--vis-max-tracks", type=int, default=128)
+    parser.add_argument(
+        "--vis-future-frames",
+        type=int,
+        default=16,
+        help="Draw each visualization point trajectory from the current frame through this many future frames.",
+    )
     return parser
 
 
@@ -711,6 +663,8 @@ def main() -> None:
         raise ValueError("--vis-max-frames must be >= 0")
     if args.vis_max_tracks < 1:
         raise ValueError("--vis-max-tracks must be a positive integer")
+    if args.vis_future_frames < 0:
+        raise ValueError("--vis-future-frames must be >= 0")
 
     data_root = resolve_data_root(args.data_root)
     output_root = Path(args.output_root)
@@ -767,6 +721,7 @@ def main() -> None:
             visualization_fps=args.vis_fps,
             visualization_max_frames=args.vis_max_frames,
             visualization_max_tracks=args.vis_max_tracks,
+            visualization_future_frames=args.vis_future_frames,
         )
         write_manifest_row(manifest_path, row)
 

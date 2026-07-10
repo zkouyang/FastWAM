@@ -56,6 +56,10 @@ except ModuleNotFoundError:
 DEFAULT_CAMERA_KEYS = ("observation.images.image", "observation.images.wrist_image")
 DEFAULT_AGENTVIEW_CAMERA_KEYS = ("observation.images.image",)
 BBOX_COLOR = (80, 220, 120)
+BBOX_TEXT_FONT = cv2.FONT_HERSHEY_SIMPLEX
+BBOX_TEXT_SCALE = 0.4
+BBOX_TEXT_THICKNESS = 1
+BBOX_TEXT_MARGIN = 5
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 LOCAL_GROUNDING_DINO_BUNDLE_ROOT = REPO_ROOT / "third_party" / "grounding_dino_torch27"
@@ -639,6 +643,46 @@ def save_frame_hdf5_labels(
             )
 
 
+def fit_bbox_label_text(text: str, max_width: int) -> str:
+    text = text[:42].strip()
+    if not text or max_width <= 0:
+        return ""
+
+    def text_width(candidate: str) -> int:
+        return cv2.getTextSize(candidate, BBOX_TEXT_FONT, BBOX_TEXT_SCALE, BBOX_TEXT_THICKNESS)[0][0]
+
+    if text_width(text) <= max_width:
+        return text
+
+    suffix = "..."
+    if text_width(suffix) > max_width:
+        return ""
+
+    for end in range(len(text) - 1, 0, -1):
+        candidate = f"{text[:end].rstrip()}{suffix}"
+        if text_width(candidate) <= max_width:
+            return candidate
+    return ""
+
+
+def bbox_label_origin(frame_shape: tuple[int, ...], x1: int, y1: int, text: str) -> tuple[int, int]:
+    h, w = frame_shape[:2]
+    (text_w, text_h), baseline = cv2.getTextSize(
+        text,
+        BBOX_TEXT_FONT,
+        BBOX_TEXT_SCALE,
+        BBOX_TEXT_THICKNESS,
+    )
+    x = int(np.clip(x1, 0, max(w - text_w - BBOX_TEXT_MARGIN, 0)))
+    y_above = y1 - BBOX_TEXT_MARGIN
+    if y_above - text_h >= 0:
+        y = y_above
+    else:
+        y = y1 + text_h + BBOX_TEXT_MARGIN
+    y = int(np.clip(y, text_h, max(h - baseline - 1, text_h)))
+    return x, y
+
+
 def make_bbox_vis_frames(
     frames: np.ndarray,
     boxes: list[np.ndarray],
@@ -662,18 +706,19 @@ def make_bbox_vis_frames(
             y2 = int(np.clip(y2, 0, max(h - 1, 0)))
             conf = float(frame_conf[box_idx]) if box_idx < len(frame_conf) else 1.0
             label = frame_labels[box_idx] if box_idx < len(frame_labels) else ""
-            text = f"{label} {conf:.2f}".strip()
+            text = fit_bbox_label_text(f"{label} {conf:.2f}".strip(), max(w - 2 * BBOX_TEXT_MARGIN, 0))
             cv2.rectangle(frame, (x1, y1), (x2, y2), BBOX_COLOR, 2)
-            cv2.putText(
-                frame,
-                text[:42],
-                (x1, max(y1 - 5, 12)),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.4,
-                BBOX_COLOR,
-                1,
-                cv2.LINE_AA,
-            )
+            if text:
+                cv2.putText(
+                    frame,
+                    text,
+                    bbox_label_origin(frame.shape, x1, y1, text),
+                    BBOX_TEXT_FONT,
+                    BBOX_TEXT_SCALE,
+                    BBOX_COLOR,
+                    BBOX_TEXT_THICKNESS,
+                    cv2.LINE_AA,
+                )
         out.append(frame)
     return out
 
