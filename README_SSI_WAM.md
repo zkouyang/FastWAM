@@ -58,10 +58,16 @@ depth_conf: [C, T_label, G, G]
 --depth-backend da3 --da3-model-id depth-anything/DA3MONO-LARGE
 ```
 
-For lightweight checks without the DA3 dependency, use:
+Depth Anything V2 ViT-L is also supported with a local repo and checkpoint:
 
 ```bash
---depth-backend heuristic
+--depth-backend da2 --da2-repo-dir ./third_party/Depth_Anything_V2 --da2-checkpoint ./third_party/Depth_Anything_V2/checkpoints/depth_anything_v2_vitl.pth
+```
+
+For temporally consistent video depth labels, use Video Depth Anything:
+
+```bash
+--depth-backend video_depth_anything --video-depth-anything-repo-dir ./third_party/Video-Depth-Anything --video-depth-anything-checkpoint ./third_party/Video-Depth-Anything/checkpoints/video_depth_anything_vitl.pth
 ```
 
 ## Trajectory-only label variant
@@ -87,10 +93,10 @@ The default backend is the SSI/ATM-style CoTracker path:
 
 It uses random query points plus a double grid, filters low-variance random
 tracks, repeats the remaining dynamic points with small spatial noise, and
-tracks again. For lightweight checks without loading CoTracker, use:
+tracks again. CoTracker2 is also supported:
 
 ```bash
---motion-backend opencv
+--motion-backend cotracker2
 ```
 
 ## ATM-style bbox label variant
@@ -617,8 +623,29 @@ python scripts/preprocess_libero_depth.py \
   --max-episodes 1 \
   --depth-backend da3 \
   --device cuda \
-  --frame-stride 999 \
+  --frame-stride 1 \
   --vis-num-demos-per-task 1 \
+  --overwrite
+```
+
+Video Depth Anything is also supported for temporally consistent depth labels.
+The default checkpoint is the official Large relative-depth model:
+`third_party/Video-Depth-Anything/checkpoints/video_depth_anything_vitl.pth`.
+
+```bash
+python scripts/preprocess_libero_depth.py \
+  --data-root ./data/libero_mujoco3.3.2 \
+  --output-root ./data/libero_mujoco3.3.2_depth_vda_smoke \
+  --suites libero_object_no_noops_lerobot \
+  --max-episodes 1 \
+  --camera-keys observation.images.image \
+  --depth-backend video_depth_anything \
+  --device cpu \
+  --image-size 64 \
+  --video-depth-anything-encoder vitl \
+  --video-depth-anything-input-size 70 \
+  --frame-stride 20 \
+  --vis-num-demos-per-task 0 \
   --overwrite
 ```
 
@@ -646,7 +673,7 @@ python scripts/preprocess_libero_motion.py \
   --max-episodes 1 \
   --motion-backend cotracker3 \
   --device cuda \
-  --frame-stride 999 \
+  --frame-stride 1 \
   --vis-num-demos-per-task 1 \
   --overwrite
 ```
@@ -677,7 +704,7 @@ python scripts/preprocess_libero_bbox.py \
   --suites libero_goal_no_noops_lerobot \
   --max-episodes 1 \
   --device cuda \
-  --frame-stride 999 \
+  --frame-stride 1 \
   --vis-num-demos-per-task 1 \
   --overwrite
 ```

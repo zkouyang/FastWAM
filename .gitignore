@@ -129,6 +129,7 @@ target/
 
 # Third party
 /third_party/sam3/
+/third_party/Video-Depth-Anything/
 /third_party/grounding_dino_torch27/gdino_checkpoints/
 /third_party/grounding_dino_torch27/grounding_dino/.asset/
 /third_party/grounding_dino_torch27/grounding_dino/demo/
@@ -141,6 +142,7 @@ target/
 
 # Local papers / notes
 /SSI/*.pdf
+/SSI/ATM_diffusion_policy/
 
 # Jupyter Notebook
 .ipynb_checkpoints

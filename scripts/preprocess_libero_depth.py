@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import sys
 import tempfile
 import warnings
 from dataclasses import dataclass
@@ -35,6 +36,15 @@ from tqdm import tqdm
 
 
 DEFAULT_CAMERA_KEYS = ("observation.images.image", "observation.images.wrist_image")
+REPO_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_DA2_REPO_DIR = REPO_ROOT / "third_party" / "Depth_Anything_V2"
+DEFAULT_DA2_CHECKPOINT = DEFAULT_DA2_REPO_DIR / "checkpoints" / "depth_anything_v2_vitl.pth"
+DEFAULT_VDA_REPO_DIR = REPO_ROOT / "third_party" / "Video-Depth-Anything"
+DEFAULT_VDA_CHECKPOINT = DEFAULT_VDA_REPO_DIR / "checkpoints" / "video_depth_anything_vitl.pth"
+VDA_MODEL_CONFIGS = {
+    "vitb": {"encoder": "vitb", "features": 128, "out_channels": [96, 192, 384, 768]},
+    "vitl": {"encoder": "vitl", "features": 256, "out_channels": [256, 512, 1024, 1024]},
+}
 
 
 @dataclass(frozen=True)
@@ -261,16 +271,28 @@ def ensure_conf_batch(conf: Any, *, depth: np.ndarray, expected_len: int) -> np.
 
 
 class DepthAnnotator:
-    def __init__(self, backend: str, *, model_id: str, device: str, grid_size: int):
+    def __init__(
+        self,
+        backend: str,
+        *,
+        model_id: str,
+        da2_repo_dir: str,
+        da2_checkpoint: str,
+        video_depth_anything_repo_dir: str,
+        video_depth_anything_checkpoint: str,
+        video_depth_anything_encoder: str,
+        video_depth_anything_input_size: int,
+        video_depth_anything_fp32: bool,
+        device: str,
+        grid_size: int,
+    ):
         self.backend = backend
         self.grid_size = grid_size
         self.device = device
         self.model: Any | None = None
+        self.video_depth_anything_input_size = video_depth_anything_input_size
+        self.video_depth_anything_fp32 = video_depth_anything_fp32
 
-        if backend == "none":
-            return
-        if backend == "heuristic":
-            return
         if backend == "da3":
             try:
                 import torch
@@ -278,42 +300,149 @@ class DepthAnnotator:
             except Exception as exc:  # pragma: no cover - optional teacher dependency
                 raise ImportError(
                     "Depth backend 'da3' requires the official Depth Anything 3 package. "
-                    "Install it from https://github.com/bytedance-seed/depth-anything-3 "
-                    "or use --depth-backend heuristic for a pipeline smoke test."
+                    "Install it from https://github.com/bytedance-seed/depth-anything-3."
                 ) from exc
 
             torch_device = torch.device(device)
             self.model = DepthAnything3.from_pretrained(model_id).to(device=torch_device)
             self.model.eval()
             return
+        if backend == "da2":
+            try:
+                import torch
+            except Exception as exc:  # pragma: no cover - optional teacher dependency
+                raise ImportError("Depth backend 'da2' requires torch.") from exc
+
+            repo_dir = Path(da2_repo_dir).expanduser()
+            if not repo_dir.exists():
+                raise FileNotFoundError(f"Depth Anything V2 repo not found: {repo_dir}")
+            if str(repo_dir) not in sys.path:
+                sys.path.insert(0, str(repo_dir))
+
+            try:
+                from depth_anything_v2.dpt import DepthAnythingV2
+            except Exception as exc:  # pragma: no cover - optional teacher dependency
+                raise ImportError(
+                    "Depth backend 'da2' requires a local Depth Anything V2 repo containing "
+                    "depth_anything_v2/dpt.py. Pass it with --da2-repo-dir."
+                ) from exc
+
+            checkpoint = Path(da2_checkpoint).expanduser()
+            if not checkpoint.exists():
+                raise FileNotFoundError(f"Depth Anything V2 ViT-L checkpoint not found: {checkpoint}")
+
+            model_config = {
+                "encoder": "vitl",
+                "features": 256,
+                "out_channels": [256, 512, 1024, 1024],
+            }
+            self.model = DepthAnythingV2(**model_config)
+            state = torch.load(checkpoint, map_location="cpu")
+            if isinstance(state, dict) and "state_dict" in state:
+                state = state["state_dict"]
+            self.model.load_state_dict(state)
+            self.model = self.model.to(torch.device(device)).eval()
+            return
+        if backend == "video_depth_anything":
+            try:
+                import torch
+            except Exception as exc:  # pragma: no cover - optional teacher dependency
+                raise ImportError("Depth backend 'video_depth_anything' requires torch.") from exc
+
+            repo_dir = Path(video_depth_anything_repo_dir).expanduser()
+            if not repo_dir.exists():
+                raise FileNotFoundError(f"Video Depth Anything repo not found: {repo_dir}")
+            if str(repo_dir) not in sys.path:
+                sys.path.insert(0, str(repo_dir))
+
+            try:
+                from video_depth_anything.video_depth import VideoDepthAnything
+            except Exception as exc:  # pragma: no cover - optional teacher dependency
+                raise ImportError(
+                    "Depth backend 'video_depth_anything' requires a local Video-Depth-Anything repo "
+                    "containing video_depth_anything/video_depth.py. Pass it with "
+                    "--video-depth-anything-repo-dir."
+                ) from exc
+
+            if video_depth_anything_encoder not in VDA_MODEL_CONFIGS:
+                raise ValueError(
+                    f"Unsupported Video Depth Anything encoder: {video_depth_anything_encoder}. "
+                    f"Choose one of {sorted(VDA_MODEL_CONFIGS)}."
+                )
+            checkpoint = Path(video_depth_anything_checkpoint).expanduser()
+            if not checkpoint.exists():
+                raise FileNotFoundError(f"Video Depth Anything checkpoint not found: {checkpoint}")
+
+            self.model = VideoDepthAnything(**VDA_MODEL_CONFIGS[video_depth_anything_encoder])
+            state = torch.load(checkpoint, map_location="cpu")
+            if isinstance(state, dict) and "state_dict" in state:
+                state = state["state_dict"]
+            self.model.load_state_dict(state, strict=True)
+            self.model = self.model.to(torch.device(device)).eval()
+            return
 
         raise ValueError(f"Unsupported depth backend: {backend}")
 
     def annotate(self, frames: np.ndarray, frame_indices: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        if self.backend == "none":
-            t = len(frame_indices)
-            z = np.zeros((t, self.grid_size, self.grid_size), dtype=np.float16)
-            raw = np.zeros((t,) + frames.shape[1:3], dtype=np.float16)
-            return z, z, raw
-
         selected = frames[frame_indices]
-        if self.backend == "heuristic":
-            depth_grids = []
-            conf_grids = []
-            raw_depths = []
-            for frame in selected:
-                gray = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY).astype(np.float32) / 255.0
-                depth = robust_normalize_depth(1.0 - gray)
-                raw_depths.append(depth)
-                depth_grids.append(resize_grid(depth, self.grid_size))
-                conf_grids.append(np.ones((self.grid_size, self.grid_size), dtype=np.float32) * 0.25)
-            return (
-                np.stack(depth_grids).astype(np.float16),
-                np.stack(conf_grids).astype(np.float16),
-                np.stack(raw_depths).astype(np.float16),
-            )
+        if self.backend == "da2":
+            return self._annotate_da2(selected)
+        if self.backend == "video_depth_anything":
+            return self._annotate_video_depth_anything(selected)
 
         assert self.backend == "da3"
+        assert self.model is not None
+        return self._annotate_da3(selected)
+
+    def _annotate_da2(self, selected: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        assert self.model is not None
+        depth_grids = []
+        conf_grids = []
+        raw_depths = []
+        for frame in selected:
+            bgr = np.ascontiguousarray(frame[..., ::-1])
+            depth = np.asarray(self.model.infer_image(bgr), dtype=np.float32)
+            depth_norm = robust_normalize_depth(depth)
+            raw_depths.append(depth_norm)
+            depth_grids.append(resize_grid(depth_norm, self.grid_size))
+            conf_grids.append(np.ones((self.grid_size, self.grid_size), dtype=np.float32))
+        return (
+            np.stack(depth_grids).astype(np.float16),
+            np.stack(conf_grids).astype(np.float16),
+            np.stack(raw_depths).astype(np.float16),
+        )
+
+    def _annotate_video_depth_anything(self, selected: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        assert self.model is not None
+        import torch
+
+        torch_device = torch.device(self.device)
+        device_type = torch_device.type
+        fp32 = self.video_depth_anything_fp32 or device_type == "cpu"
+        with torch.inference_mode():
+            depth, _ = self.model.infer_video_depth(
+                selected,
+                target_fps=-1,
+                input_size=self.video_depth_anything_input_size,
+                device=device_type,
+                fp32=fp32,
+            )
+
+        depth_grids = []
+        conf_grids = []
+        raw_depths = []
+        for d in ensure_depth_batch(depth, expected_len=len(selected), name="Video Depth Anything depth"):
+            depth_norm = robust_normalize_depth(d)
+            raw_depths.append(depth_norm)
+            depth_grids.append(resize_grid(depth_norm, self.grid_size))
+            conf_grids.append(np.ones((self.grid_size, self.grid_size), dtype=np.float32))
+        return (
+            np.stack(depth_grids).astype(np.float16),
+            np.stack(conf_grids).astype(np.float16),
+            np.stack(raw_depths).astype(np.float16),
+        )
+
+    def _annotate_da3(self, selected: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         assert self.model is not None
         with tempfile.TemporaryDirectory(prefix="fastwam_da3_") as tmp:
             tmpdir = Path(tmp)
@@ -560,8 +689,45 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--device", default="cuda")
 
-    parser.add_argument("--depth-backend", choices=["da3", "heuristic", "none"], default="da3")
+    parser.add_argument("--depth-backend", choices=["da3", "da2", "video_depth_anything"], default="da3")
     parser.add_argument("--da3-model-id", default="depth-anything/DA3MONO-LARGE")
+    parser.add_argument(
+        "--da2-repo-dir",
+        default=str(DEFAULT_DA2_REPO_DIR),
+        help="Local Depth Anything V2 repo directory for --depth-backend da2.",
+    )
+    parser.add_argument(
+        "--da2-checkpoint",
+        default=str(DEFAULT_DA2_CHECKPOINT),
+        help="Depth Anything V2 ViT-L checkpoint for --depth-backend da2.",
+    )
+    parser.add_argument(
+        "--video-depth-anything-repo-dir",
+        default=str(DEFAULT_VDA_REPO_DIR),
+        help="Local Video Depth Anything repo directory for --depth-backend video_depth_anything.",
+    )
+    parser.add_argument(
+        "--video-depth-anything-checkpoint",
+        default=str(DEFAULT_VDA_CHECKPOINT),
+        help="Video Depth Anything checkpoint for --depth-backend video_depth_anything.",
+    )
+    parser.add_argument(
+        "--video-depth-anything-encoder",
+        choices=sorted(VDA_MODEL_CONFIGS),
+        default="vitl",
+        help="Video Depth Anything encoder variant. The default matches the Large checkpoint.",
+    )
+    parser.add_argument(
+        "--video-depth-anything-input-size",
+        type=int,
+        default=518,
+        help="Video Depth Anything inference input size; use a smaller multiple of 14 for CPU smoke tests.",
+    )
+    parser.add_argument(
+        "--video-depth-anything-fp32",
+        action="store_true",
+        help="Run Video Depth Anything in fp32 instead of autocast. CPU always uses fp32.",
+    )
     parser.add_argument("--image-size", type=int, default=224, help="Per-camera teacher input resolution.")
     parser.add_argument("--grid-size", type=int, default=8, help="Depth grid size.")
     parser.add_argument("--frame-stride", type=int, default=1, help="Depth frame stride. Use 1 for full coverage.")
@@ -579,6 +745,8 @@ def main() -> None:
         raise ValueError("--frame-stride must be >= 1")
     if args.grid_size < 1:
         raise ValueError("--grid-size must be a positive integer")
+    if args.video_depth_anything_input_size < 14:
+        raise ValueError("--video-depth-anything-input-size must be >= 14")
     if args.vis_num_demos_per_task < 0:
         raise ValueError("--vis-num-demos-per-task must be >= 0")
     if args.vis_fps < 1:
@@ -614,6 +782,13 @@ def main() -> None:
     depth_annotator = DepthAnnotator(
         args.depth_backend,
         model_id=args.da3_model_id,
+        da2_repo_dir=args.da2_repo_dir,
+        da2_checkpoint=args.da2_checkpoint,
+        video_depth_anything_repo_dir=args.video_depth_anything_repo_dir,
+        video_depth_anything_checkpoint=args.video_depth_anything_checkpoint,
+        video_depth_anything_encoder=args.video_depth_anything_encoder,
+        video_depth_anything_input_size=args.video_depth_anything_input_size,
+        video_depth_anything_fp32=args.video_depth_anything_fp32,
         device=args.device,
         grid_size=args.grid_size,
     )
