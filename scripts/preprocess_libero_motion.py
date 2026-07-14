@@ -1,10 +1,8 @@
 #!/usr/bin/env python3
 """Offline trajectory-label preprocessing for the LIBERO FastWAM dataset.
 
-This motion-only preprocessor is extracted from `preprocess_libero_ssi.py` in
-the same self-contained style as `preprocess_libero_bbox.py`: it keeps the
-LIBERO episode/video loading and manifest writing, but only computes point
-trajectory labels.
+This self-contained motion-only preprocessor keeps LIBERO episode/video loading
+and manifest writing, but only computes point-trajectory labels.
 
 The produced `.motion.npz` cache stores episode-level trajectory labels:
 
@@ -701,29 +699,47 @@ def main() -> None:
     )
 
     visualization_counts: dict[tuple[str, str], int] = {}
-    for ep in tqdm(episodes, desc="episodes"):
-        vis_key = (ep.suite, ep.task)
-        cur_vis_count = visualization_counts.get(vis_key, 0)
-        save_visualization = args.vis_num_demos_per_task > 0 and cur_vis_count < args.vis_num_demos_per_task
-        if save_visualization:
-            visualization_counts[vis_key] = cur_vis_count + 1
+    total_frames = sum(ep.length for ep in episodes)
+    progress_format = (
+        "{desc}: {percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt} frames "
+        "[Elapsed: {elapsed}, Estimated remaining: {remaining}, {rate_fmt}]{postfix}"
+    )
+    with tqdm(
+        total=total_frames,
+        desc="Motion preprocessing",
+        unit="frame",
+        dynamic_ncols=True,
+        bar_format=progress_format,
+    ) as progress:
+        for episode_number, ep in enumerate(episodes, start=1):
+            progress.set_postfix_str(
+                f"episode {episode_number}/{len(episodes)}, {ep.suite}/ep{ep.episode_index:06d}",
+                refresh=True,
+            )
 
-        row = process_episode(
-            ep,
-            output_root=output_root,
-            camera_keys=tuple(args.camera_keys),
-            frame_stride=args.frame_stride,
-            image_size=args.image_size,
-            motion_annotator=motion_annotator,
-            overwrite=args.overwrite,
-            save_visualization=save_visualization,
-            visualization_root=visualization_root,
-            visualization_fps=args.vis_fps,
-            visualization_max_frames=args.vis_max_frames,
-            visualization_max_tracks=args.vis_max_tracks,
-            visualization_future_frames=args.vis_future_frames,
-        )
-        write_manifest_row(manifest_path, row)
+            vis_key = (ep.suite, ep.task)
+            cur_vis_count = visualization_counts.get(vis_key, 0)
+            save_visualization = args.vis_num_demos_per_task > 0 and cur_vis_count < args.vis_num_demos_per_task
+            if save_visualization:
+                visualization_counts[vis_key] = cur_vis_count + 1
+
+            row = process_episode(
+                ep,
+                output_root=output_root,
+                camera_keys=tuple(args.camera_keys),
+                frame_stride=args.frame_stride,
+                image_size=args.image_size,
+                motion_annotator=motion_annotator,
+                overwrite=args.overwrite,
+                save_visualization=save_visualization,
+                visualization_root=visualization_root,
+                visualization_fps=args.vis_fps,
+                visualization_max_frames=args.vis_max_frames,
+                visualization_max_tracks=args.vis_max_tracks,
+                visualization_future_frames=args.vis_future_frames,
+            )
+            write_manifest_row(manifest_path, row)
+            progress.update(ep.length)
 
     print(f"[MOTION] done. Manifest: {manifest_path}")
 

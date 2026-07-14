@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
 """Offline depth-label preprocessing for the LIBERO FastWAM dataset.
 
-This depth-only preprocessor is extracted from `preprocess_libero_ssi.py` in
-the same spirit as `preprocess_libero_bbox.py`: it keeps the self-contained
-LIBERO episode/video loading and manifest writing, but only computes monocular
-depth grid labels.
+This self-contained depth-only preprocessor keeps LIBERO episode/video loading
+and manifest writing, but only computes monocular depth-map labels.
 
 The produced `.depth.npz` cache stores episode-level depth labels:
 
-    depth:      [C, T_label, G, G]
-    depth_conf: [C, T_label, G, G]
+    depth:      [C, T_label, H_label, W_label]
+    depth_conf: [C, T_label, H_label, W_label]
 
-`C` is the number of camera keys, `T_label` is controlled by `--frame-stride`,
-and `G` is controlled by `--grid-size`.
+`C` is the number of camera keys and `T_label` is controlled by
+`--frame-stride`. DA3 and Video Depth Anything labels keep the teacher input
+resolution (224x224 by default). Video Depth Anything is the default backend.
 """
 
 from __future__ import annotations
@@ -37,8 +36,6 @@ from tqdm import tqdm
 
 DEFAULT_CAMERA_KEYS = ("observation.images.image", "observation.images.wrist_image")
 REPO_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_DA2_REPO_DIR = REPO_ROOT / "third_party" / "Depth_Anything_V2"
-DEFAULT_DA2_CHECKPOINT = DEFAULT_DA2_REPO_DIR / "checkpoints" / "depth_anything_v2_vitl.pth"
 DEFAULT_VDA_REPO_DIR = REPO_ROOT / "third_party" / "Video-Depth-Anything"
 DEFAULT_VDA_CHECKPOINT = DEFAULT_VDA_REPO_DIR / "checkpoints" / "video_depth_anything_vitl.pth"
 VDA_MODEL_CONFIGS = {
@@ -229,8 +226,13 @@ def robust_normalize_depth(depth: np.ndarray) -> np.ndarray:
     return np.clip(norm, 0.0, 1.0).astype(np.float32)
 
 
-def resize_grid(arr: np.ndarray, grid_size: int, interpolation: int = cv2.INTER_AREA) -> np.ndarray:
-    return cv2.resize(arr.astype(np.float32), (grid_size, grid_size), interpolation=interpolation)
+def restore_depth_resolution(arr: np.ndarray, size_hw: tuple[int, int]) -> np.ndarray:
+    """Return a depth/confidence map at the video input resolution."""
+    h, w = size_hw
+    out = np.asarray(arr, dtype=np.float32)
+    if out.shape == (h, w):
+        return out
+    return cv2.resize(out, (w, h), interpolation=cv2.INTER_LINEAR)
 
 
 def slugify(text: str, max_len: int = 80) -> str:
@@ -276,18 +278,14 @@ class DepthAnnotator:
         backend: str,
         *,
         model_id: str,
-        da2_repo_dir: str,
-        da2_checkpoint: str,
         video_depth_anything_repo_dir: str,
         video_depth_anything_checkpoint: str,
         video_depth_anything_encoder: str,
         video_depth_anything_input_size: int,
         video_depth_anything_fp32: bool,
         device: str,
-        grid_size: int,
     ):
         self.backend = backend
-        self.grid_size = grid_size
         self.device = device
         self.model: Any | None = None
         self.video_depth_anything_input_size = video_depth_anything_input_size
@@ -306,42 +304,6 @@ class DepthAnnotator:
             torch_device = torch.device(device)
             self.model = DepthAnything3.from_pretrained(model_id).to(device=torch_device)
             self.model.eval()
-            return
-        if backend == "da2":
-            try:
-                import torch
-            except Exception as exc:  # pragma: no cover - optional teacher dependency
-                raise ImportError("Depth backend 'da2' requires torch.") from exc
-
-            repo_dir = Path(da2_repo_dir).expanduser()
-            if not repo_dir.exists():
-                raise FileNotFoundError(f"Depth Anything V2 repo not found: {repo_dir}")
-            if str(repo_dir) not in sys.path:
-                sys.path.insert(0, str(repo_dir))
-
-            try:
-                from depth_anything_v2.dpt import DepthAnythingV2
-            except Exception as exc:  # pragma: no cover - optional teacher dependency
-                raise ImportError(
-                    "Depth backend 'da2' requires a local Depth Anything V2 repo containing "
-                    "depth_anything_v2/dpt.py. Pass it with --da2-repo-dir."
-                ) from exc
-
-            checkpoint = Path(da2_checkpoint).expanduser()
-            if not checkpoint.exists():
-                raise FileNotFoundError(f"Depth Anything V2 ViT-L checkpoint not found: {checkpoint}")
-
-            model_config = {
-                "encoder": "vitl",
-                "features": 256,
-                "out_channels": [256, 512, 1024, 1024],
-            }
-            self.model = DepthAnythingV2(**model_config)
-            state = torch.load(checkpoint, map_location="cpu")
-            if isinstance(state, dict) and "state_dict" in state:
-                state = state["state_dict"]
-            self.model.load_state_dict(state)
-            self.model = self.model.to(torch.device(device)).eval()
             return
         if backend == "video_depth_anything":
             try:
@@ -383,10 +345,8 @@ class DepthAnnotator:
 
         raise ValueError(f"Unsupported depth backend: {backend}")
 
-    def annotate(self, frames: np.ndarray, frame_indices: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    def annotate(self, frames: np.ndarray, frame_indices: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         selected = frames[frame_indices]
-        if self.backend == "da2":
-            return self._annotate_da2(selected)
         if self.backend == "video_depth_anything":
             return self._annotate_video_depth_anything(selected)
 
@@ -394,25 +354,7 @@ class DepthAnnotator:
         assert self.model is not None
         return self._annotate_da3(selected)
 
-    def _annotate_da2(self, selected: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        assert self.model is not None
-        depth_grids = []
-        conf_grids = []
-        raw_depths = []
-        for frame in selected:
-            bgr = np.ascontiguousarray(frame[..., ::-1])
-            depth = np.asarray(self.model.infer_image(bgr), dtype=np.float32)
-            depth_norm = robust_normalize_depth(depth)
-            raw_depths.append(depth_norm)
-            depth_grids.append(resize_grid(depth_norm, self.grid_size))
-            conf_grids.append(np.ones((self.grid_size, self.grid_size), dtype=np.float32))
-        return (
-            np.stack(depth_grids).astype(np.float16),
-            np.stack(conf_grids).astype(np.float16),
-            np.stack(raw_depths).astype(np.float16),
-        )
-
-    def _annotate_video_depth_anything(self, selected: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    def _annotate_video_depth_anything(self, selected: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         assert self.model is not None
         import torch
 
@@ -428,21 +370,19 @@ class DepthAnnotator:
                 fp32=fp32,
             )
 
-        depth_grids = []
-        conf_grids = []
-        raw_depths = []
+        depth_labels = []
+        conf_labels = []
+        output_size = tuple(selected.shape[1:3])
         for d in ensure_depth_batch(depth, expected_len=len(selected), name="Video Depth Anything depth"):
             depth_norm = robust_normalize_depth(d)
-            raw_depths.append(depth_norm)
-            depth_grids.append(resize_grid(depth_norm, self.grid_size))
-            conf_grids.append(np.ones((self.grid_size, self.grid_size), dtype=np.float32))
+            depth_labels.append(restore_depth_resolution(depth_norm, output_size))
+            conf_labels.append(np.ones(output_size, dtype=np.float32))
         return (
-            np.stack(depth_grids).astype(np.float16),
-            np.stack(conf_grids).astype(np.float16),
-            np.stack(raw_depths).astype(np.float16),
+            np.stack(depth_labels).astype(np.float16),
+            np.stack(conf_labels).astype(np.float16),
         )
 
-    def _annotate_da3(self, selected: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    def _annotate_da3(self, selected: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         assert self.model is not None
         with tempfile.TemporaryDirectory(prefix="fastwam_da3_") as tmp:
             tmpdir = Path(tmp)
@@ -456,18 +396,16 @@ class DepthAnnotator:
             depth = ensure_depth_batch(prediction.depth, expected_len=len(selected), name="DA3 depth")
             conf = ensure_conf_batch(getattr(prediction, "conf", None), depth=depth, expected_len=len(selected))
 
-        depth_grids = []
-        conf_grids = []
-        raw_depths = []
+        depth_labels = []
+        conf_labels = []
+        output_size = tuple(selected.shape[1:3])
         for d, c in zip(depth, conf, strict=True):
             depth_norm = robust_normalize_depth(d)
-            raw_depths.append(depth_norm)
-            depth_grids.append(resize_grid(depth_norm, self.grid_size))
-            conf_grids.append(resize_grid(np.clip(c, 0.0, 1.0), self.grid_size))
+            depth_labels.append(restore_depth_resolution(depth_norm, output_size))
+            conf_labels.append(restore_depth_resolution(np.clip(c, 0.0, 1.0), output_size))
         return (
-            np.stack(depth_grids).astype(np.float16),
-            np.stack(conf_grids).astype(np.float16),
-            np.stack(raw_depths).astype(np.float16),
+            np.stack(depth_labels).astype(np.float16),
+            np.stack(conf_labels).astype(np.float16),
         )
 
 
@@ -490,15 +428,13 @@ def colorize_scalar_map(values: np.ndarray, size_hw: tuple[int, int], cmap: int 
 def make_depth_vis_frames(
     frames: np.ndarray,
     depth: np.ndarray,
-    raw_depth: np.ndarray,
     frame_indices: np.ndarray,
 ) -> list[np.ndarray]:
     out: list[np.ndarray] = []
     for i, frame_idx in enumerate(frame_indices):
         frame = frames[int(frame_idx)]
         depth_rgb = colorize_scalar_map(depth[i], frame.shape[:2])
-        raw_depth_rgb = colorize_scalar_map(raw_depth[i], frame.shape[:2])
-        out.append(np.concatenate([frame, depth_rgb, raw_depth_rgb], axis=1))
+        out.append(np.concatenate([frame, depth_rgb], axis=1))
     return out
 
 
@@ -547,7 +483,6 @@ def save_episode_visualizations(
     frames_by_camera: list[np.ndarray],
     frame_indices: np.ndarray,
     depth_all: list[np.ndarray],
-    raw_depth_all: list[np.ndarray],
     fps: int,
     max_frames: int,
 ) -> None:
@@ -566,9 +501,8 @@ def save_episode_visualizations(
         cam_dir = task_dir / f"camera_{cam_idx:02d}_{slugify(camera_key)}"
         frames = frames_by_camera[cam_idx]
         depth = depth_all[cam_idx][keep]
-        raw_depth = raw_depth_all[cam_idx][keep]
         write_rgb_video_or_contact_sheet(
-            make_depth_vis_frames(frames, depth, raw_depth, vis_frame_indices),
+            make_depth_vis_frames(frames, depth, vis_frame_indices),
             cam_dir / "depth_map.mp4",
             fps,
         )
@@ -618,26 +552,27 @@ def process_episode(
     frame_indices = np.arange(0, min_len, frame_stride, dtype=np.int32)
     depth_all = []
     depth_conf_all = []
-    raw_depth_all = []
 
     desc = f"{ep.suite}/ep{ep.episode_index:06d} cameras"
     for frames in tqdm(frames_by_camera, desc=desc, leave=False):
-        depth, depth_conf, raw_depth = depth_annotator.annotate(frames, frame_indices)
+        depth, depth_conf = depth_annotator.annotate(frames, frame_indices)
         depth_all.append(depth)
         depth_conf_all.append(depth_conf)
-        raw_depth_all.append(raw_depth)
+
+    label_height, label_width = depth_all[0].shape[-2:]
 
     meta = {
-        "schema_version": "fastwam_depth_v1_episode_labels",
+        "schema_version": "fastwam_depth_v2_fullres_episode_labels",
         "suite": ep.suite,
         "episode_index": ep.episode_index,
         "task": ep.task,
         "camera_keys": camera_keys,
         "image_size": image_size,
-        "grid_size": depth_annotator.grid_size,
+        "label_height": label_height,
+        "label_width": label_width,
         "frame_stride": frame_stride,
         "depth_backend": depth_annotator.backend,
-        "depth_convention": "depth is robust-normalized to [0,1] per labeled frame and downsampled to the grid",
+        "depth_convention": "depth is robust-normalized to [0,1] per labeled frame at the teacher input resolution",
         "label_stage_note": "Training code should slice frame_indices/depth according to the desired FastWAM horizon.",
     }
 
@@ -659,7 +594,6 @@ def process_episode(
             frames_by_camera=frames_by_camera,
             frame_indices=frame_indices,
             depth_all=depth_all,
-            raw_depth_all=raw_depth_all,
             fps=visualization_fps,
             max_frames=visualization_max_frames,
         )
@@ -689,18 +623,12 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--device", default="cuda")
 
-    parser.add_argument("--depth-backend", choices=["da3", "da2", "video_depth_anything"], default="da3")
+    parser.add_argument(
+        "--depth-backend",
+        choices=["da3", "video_depth_anything"],
+        default="video_depth_anything",
+    )
     parser.add_argument("--da3-model-id", default="depth-anything/DA3MONO-LARGE")
-    parser.add_argument(
-        "--da2-repo-dir",
-        default=str(DEFAULT_DA2_REPO_DIR),
-        help="Local Depth Anything V2 repo directory for --depth-backend da2.",
-    )
-    parser.add_argument(
-        "--da2-checkpoint",
-        default=str(DEFAULT_DA2_CHECKPOINT),
-        help="Depth Anything V2 ViT-L checkpoint for --depth-backend da2.",
-    )
     parser.add_argument(
         "--video-depth-anything-repo-dir",
         default=str(DEFAULT_VDA_REPO_DIR),
@@ -728,8 +656,12 @@ def build_argparser() -> argparse.ArgumentParser:
         action="store_true",
         help="Run Video Depth Anything in fp32 instead of autocast. CPU always uses fp32.",
     )
-    parser.add_argument("--image-size", type=int, default=224, help="Per-camera teacher input resolution.")
-    parser.add_argument("--grid-size", type=int, default=8, help="Depth grid size.")
+    parser.add_argument(
+        "--image-size",
+        type=int,
+        default=224,
+        help="Per-camera teacher input resolution; VDA therefore processes 224x224 videos by default.",
+    )
     parser.add_argument("--frame-stride", type=int, default=1, help="Depth frame stride. Use 1 for full coverage.")
 
     parser.add_argument("--vis-num-demos-per-task", type=int, default=1)
@@ -743,8 +675,8 @@ def main() -> None:
     args = build_argparser().parse_args()
     if args.frame_stride < 1:
         raise ValueError("--frame-stride must be >= 1")
-    if args.grid_size < 1:
-        raise ValueError("--grid-size must be a positive integer")
+    if args.image_size < 1:
+        raise ValueError("--image-size must be a positive integer")
     if args.video_depth_anything_input_size < 14:
         raise ValueError("--video-depth-anything-input-size must be >= 14")
     if args.vis_num_demos_per_task < 0:
@@ -782,39 +714,54 @@ def main() -> None:
     depth_annotator = DepthAnnotator(
         args.depth_backend,
         model_id=args.da3_model_id,
-        da2_repo_dir=args.da2_repo_dir,
-        da2_checkpoint=args.da2_checkpoint,
         video_depth_anything_repo_dir=args.video_depth_anything_repo_dir,
         video_depth_anything_checkpoint=args.video_depth_anything_checkpoint,
         video_depth_anything_encoder=args.video_depth_anything_encoder,
         video_depth_anything_input_size=args.video_depth_anything_input_size,
         video_depth_anything_fp32=args.video_depth_anything_fp32,
         device=args.device,
-        grid_size=args.grid_size,
     )
 
     visualization_counts: dict[tuple[str, str], int] = {}
-    for ep in tqdm(episodes, desc="episodes"):
-        vis_key = (ep.suite, ep.task)
-        cur_vis_count = visualization_counts.get(vis_key, 0)
-        save_visualization = args.vis_num_demos_per_task > 0 and cur_vis_count < args.vis_num_demos_per_task
-        if save_visualization:
-            visualization_counts[vis_key] = cur_vis_count + 1
+    total_frames = sum(ep.length for ep in episodes)
+    progress_format = (
+        "{desc}: {percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt} frames "
+        "[Elapsed: {elapsed}, Estimated remaining: {remaining}, {rate_fmt}]{postfix}"
+    )
+    with tqdm(
+        total=total_frames,
+        desc="Depth preprocessing",
+        unit="frame",
+        dynamic_ncols=True,
+        bar_format=progress_format,
+    ) as progress:
+        for episode_number, ep in enumerate(episodes, start=1):
+            progress.set_postfix_str(
+                f"episode {episode_number}/{len(episodes)}, {ep.suite}/ep{ep.episode_index:06d}",
+                refresh=True,
+            )
 
-        row = process_episode(
-            ep,
-            output_root=output_root,
-            camera_keys=tuple(args.camera_keys),
-            frame_stride=args.frame_stride,
-            image_size=args.image_size,
-            depth_annotator=depth_annotator,
-            overwrite=args.overwrite,
-            save_visualization=save_visualization,
-            visualization_root=visualization_root,
-            visualization_fps=args.vis_fps,
-            visualization_max_frames=args.vis_max_frames,
-        )
-        write_manifest_row(manifest_path, row)
+            vis_key = (ep.suite, ep.task)
+            cur_vis_count = visualization_counts.get(vis_key, 0)
+            save_visualization = args.vis_num_demos_per_task > 0 and cur_vis_count < args.vis_num_demos_per_task
+            if save_visualization:
+                visualization_counts[vis_key] = cur_vis_count + 1
+
+            row = process_episode(
+                ep,
+                output_root=output_root,
+                camera_keys=tuple(args.camera_keys),
+                frame_stride=args.frame_stride,
+                image_size=args.image_size,
+                depth_annotator=depth_annotator,
+                overwrite=args.overwrite,
+                save_visualization=save_visualization,
+                visualization_root=visualization_root,
+                visualization_fps=args.vis_fps,
+                visualization_max_frames=args.vis_max_frames,
+            )
+            write_manifest_row(manifest_path, row)
+            progress.update(ep.length)
 
     print(f"[DEPTH] done. Manifest: {manifest_path}")
 
