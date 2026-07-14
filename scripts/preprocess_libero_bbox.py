@@ -35,6 +35,7 @@ files containing datasets named `bboxes` and `confidences`.
 from __future__ import annotations
 
 import argparse
+import fcntl
 import importlib
 import json
 import os
@@ -44,6 +45,7 @@ import tempfile
 import warnings
 from contextlib import nullcontext
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -302,20 +304,42 @@ def slugify(text: str, max_len: int = 80) -> str:
 
 
 def write_manifest_row(path: Path, row: dict[str, Any]) -> None:
-    existing = read_jsonl(path) if path.exists() else []
-    key = (row.get("suite"), row.get("episode_index"))
-    existing = [
-        item
-        for item in existing
-        if (item.get("suite"), item.get("episode_index")) != key
-    ]
-    existing.append(row)
-    tmp_path = path.with_suffix(path.suffix + ".tmp")
-    tmp_path.write_text(
-        "".join(json.dumps(item, ensure_ascii=False) + "\n" for item in existing),
-        encoding="utf-8",
-    )
-    tmp_path.replace(path)
+    """Atomically upsert one row, including across concurrent suite workers."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = path.with_name(path.name + ".lock")
+    with lock_path.open("a+", encoding="utf-8") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        existing = read_jsonl(path) if path.exists() else []
+        key = (row.get("suite"), row.get("episode_index"))
+        existing = [
+            item
+            for item in existing
+            if (item.get("suite"), item.get("episode_index")) != key
+        ]
+        existing.append(row)
+        existing.sort(key=lambda item: (str(item.get("suite", "")), int(item.get("episode_index", -1))))
+
+        tmp_path: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=path.parent,
+                prefix=f".{path.name}.",
+                suffix=".tmp",
+                delete=False,
+            ) as tmp_file:
+                tmp_path = Path(tmp_file.name)
+                tmp_file.write(
+                    "".join(json.dumps(item, ensure_ascii=False) + "\n" for item in existing)
+                )
+                tmp_file.flush()
+                os.fsync(tmp_file.fileno())
+            os.replace(tmp_path, path)
+            tmp_path = None
+        finally:
+            if tmp_path is not None:
+                tmp_path.unlink(missing_ok=True)
 
 
 def write_rgb_video_or_contact_sheet(frames: list[np.ndarray], path: Path, fps: int, *, max_sheet_frames: int = 12) -> None:
@@ -709,12 +733,19 @@ class GroundedSam2VideoAnnotator(LocalGroundingDinoBBoxAnnotator):
             sys.path.insert(0, repo_path)
         try:
             from sam2.build_sam import build_sam2_video_predictor
+            import sam2.sam2_video_predictor as sam2_video_predictor_module
+            import sam2.utils.misc as sam2_misc_module
         except Exception as exc:
             raise ImportError(
                 "Grounded SAM 2 requires the local SAM 2 package and its dependencies. "
                 "Install it in the fastwam environment with "
                 f"`SAM2_BUILD_CUDA=0 pip install -e {sam2_repo_dir}`."
             ) from exc
+
+        # Keep the caller's overall bar as the only progress display.
+        quiet_tqdm = partial(tqdm, disable=True)
+        sam2_video_predictor_module.tqdm = quiet_tqdm
+        sam2_misc_module.tqdm = quiet_tqdm
 
         self.sam2_repo_dir = sam2_repo_dir
         self.sam2_config = sam2_config
@@ -1157,8 +1188,7 @@ def process_episode(
     labels_all: list[list[list[str]]] = []
     masks_all: list[list[np.ndarray]] | None = [] if bbox_annotator.backend == "grounded_sam2" else None
 
-    desc = f"{ep.suite}/ep{ep.episode_index:06d} cameras"
-    for cam_idx, frames in enumerate(tqdm(frames_by_camera, desc=desc, leave=False)):
+    for cam_idx, frames in enumerate(frames_by_camera):
         camera_key = camera_keys[cam_idx]
         if isinstance(bbox_annotator, GroundedSam2VideoAnnotator):
             boxes, confidences, labels, masks = bbox_annotator.annotate_video(
@@ -1465,29 +1495,50 @@ def main() -> None:
         bbox_annotator = LocalGroundingDinoBBoxAnnotator(**annotator_kwargs)
 
     visualization_counts: dict[tuple[str, str], int] = {}
-    for ep in tqdm(episodes, desc="episodes"):
-        vis_key = (ep.suite, ep.task)
-        cur_vis_count = visualization_counts.get(vis_key, 0)
-        save_visualization = args.vis_num_demos_per_task > 0 and cur_vis_count < args.vis_num_demos_per_task
-        if save_visualization:
-            visualization_counts[vis_key] = cur_vis_count + 1
+    total_frames = sum(ep.length for ep in episodes)
+    progress_format = (
+        "{desc}: {percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt} frames "
+        "[Elapsed: {elapsed}, Estimated remaining: {remaining}, {rate_fmt}]{postfix}"
+    )
+    with tqdm(
+        total=total_frames,
+        desc="BBox preprocessing",
+        unit="frame",
+        dynamic_ncols=True,
+        bar_format=progress_format,
+    ) as progress:
+        for episode_number, ep in enumerate(episodes, start=1):
+            progress.set_postfix_str(
+                f"episode {episode_number}/{len(episodes)}, {ep.suite}/ep{ep.episode_index:06d}",
+                refresh=True,
+            )
 
-        row = process_episode(
-            ep,
-            output_root=output_root,
-            camera_keys=tuple(args.camera_keys),
-            frame_stride=args.frame_stride,
-            image_size=args.image_size,
-            bbox_annotator=bbox_annotator,
-            overwrite=args.overwrite,
-            save_visualization=save_visualization,
-            visualization_root=visualization_root,
-            visualization_fps=args.vis_fps,
-            visualization_max_frames=args.vis_max_frames,
-            write_frame_hdf5=args.write_frame_hdf5,
-            frame_hdf5_root=Path(args.frame_hdf5_root),
-        )
-        write_manifest_row(manifest_path, row)
+            vis_key = (ep.suite, ep.task)
+            cur_vis_count = visualization_counts.get(vis_key, 0)
+            save_visualization = (
+                args.vis_num_demos_per_task > 0
+                and cur_vis_count < args.vis_num_demos_per_task
+            )
+            if save_visualization:
+                visualization_counts[vis_key] = cur_vis_count + 1
+
+            row = process_episode(
+                ep,
+                output_root=output_root,
+                camera_keys=tuple(args.camera_keys),
+                frame_stride=args.frame_stride,
+                image_size=args.image_size,
+                bbox_annotator=bbox_annotator,
+                overwrite=args.overwrite,
+                save_visualization=save_visualization,
+                visualization_root=visualization_root,
+                visualization_fps=args.vis_fps,
+                visualization_max_frames=args.vis_max_frames,
+                write_frame_hdf5=args.write_frame_hdf5,
+                frame_hdf5_root=Path(args.frame_hdf5_root),
+            )
+            write_manifest_row(manifest_path, row)
+            progress.update(ep.length)
 
     print(f"[BBOX] done. Manifest: {manifest_path}")
 
