@@ -11,42 +11,46 @@ def get_task_to_prompt_dict() -> dict[str, dict[str, str]]:
             "push_the_plate_to_the_front_of_the_stove_demo": "the pink-white plate. the gas stove.",
             "put_the_bowl_on_the_plate_demo": "the pink-white plate. the gray bowl.",
             "put_the_bowl_on_the_stove_demo": "the gas stove. the gray bowl.",
-            "put_the_bowl_on_top_of_the_cabinet_demo": "the black drawer. the gray bowl.",
-            "put_the_cream_cheese_in_the_bowl_demo": "the suger box. the gray bowl.",
-            "put_the_wine_bottle_on_the_rack_demo": "the bottle. the stripped rack.",
-            "put_the_wine_bottle_on_top_of_the_cabinet_demo": "the bottle. the black drawer.",
+            "put_the_bowl_on_top_of_the_cabinet_demo": "the black cabinet. the gray bowl.",
+            "put_the_cream_cheese_in_the_bowl_demo": (
+                "the blue cream cheese box. the speckled gray bowl."
+            ),
+            "put_the_wine_bottle_on_the_rack_demo": "the green wine bottle. the stripped rack.",
+            "put_the_wine_bottle_on_top_of_the_cabinet_demo": (
+                "the green wine bottle. the black cabinet."
+            ),
             "turn_on_the_stove_demo": "the gas stove.",
         },
         "libero_spatial": {
             "pick_up_the_black_bowl_between_the_plate_and_the_ramekin_and_place_it_on_the_plate_demo": (
-                "the gray bowl. the pink-white plate."
+                "the gray bowl between the plate and the ramekin. the pink-white plate."
             ),
             "pick_up_the_black_bowl_from_table_center_and_place_it_on_the_plate_demo": (
-                "the gray bowl. the pink-white plate."
+                "the gray bowl at the center of the table. the pink-white plate."
             ),
             "pick_up_the_black_bowl_in_the_top_drawer_of_the_wooden_cabinet_and_place_it_on_the_plate_demo": (
-                "the gray bowl. the pink-white plate."
+                "the gray bowl in the black open drawer. the pink-white plate."
             ),
             "pick_up_the_black_bowl_next_to_the_cookie_box_and_place_it_on_the_plate_demo": (
-                "the gray bowl. the pink-white plate."
+                "the gray bowl next to the cookie box. the pink-white plate."
             ),
             "pick_up_the_black_bowl_next_to_the_plate_and_place_it_on_the_plate_demo": (
-                "the gray bowl. the pink-white plate."
+                "the gray bowl next to the pink-white plate. the pink-white plate."
             ),
             "pick_up_the_black_bowl_next_to_the_ramekin_and_place_it_on_the_plate_demo": (
-                "the gray bowl. the pink-white plate."
+                "the left gray bowl beside the silver ramekin. the pink-white plate."
             ),
             "pick_up_the_black_bowl_on_the_cookie_box_and_place_it_on_the_plate_demo": (
-                "the gray bowl. the pink-white plate."
+                "the gray bowl on the cookie box. the pink-white plate."
             ),
             "pick_up_the_black_bowl_on_the_ramekin_and_place_it_on_the_plate_demo": (
-                "the gray bowl. the pink-white plate."
+                "the gray bowl on the ramekin. the pink-white plate."
             ),
             "pick_up_the_black_bowl_on_the_stove_and_place_it_on_the_plate_demo": (
-                "the gray bowl. the pink-white plate."
+                "the gray bowl on the stove. the pink-white plate."
             ),
             "pick_up_the_black_bowl_on_the_wooden_cabinet_and_place_it_on_the_plate_demo": (
-                "the gray bowl. the pink-white plate."
+                "the gray bowl on the wooden cabinet. the pink-white plate."
             ),
         },
         "libero_object": {
@@ -62,14 +66,18 @@ def get_task_to_prompt_dict() -> dict[str, dict[str, str]]:
             "pick_up_the_tomato_sauce_and_place_it_in_the_basket_demo": "the basket.",
         },
         "libero_10": {
-            "KITCHEN_SCENE3_turn_on_the_stove_and_put_the_moka_pot_on_it_demo": "the moka pot.",
+            "KITCHEN_SCENE3_turn_on_the_stove_and_put_the_moka_pot_on_it_demo": (
+                "the white moka pot."
+            ),
             "KITCHEN_SCENE4_put_the_black_bowl_in_the_bottom_drawer_of_the_cabinet_and_close_it_demo": (
-                "the black drawer. the gray bowl."
+                "the black drawer. the speckled gray bowl."
             ),
             "KITCHEN_SCENE6_put_the_yellow_and_white_mug_in_the_microwave_and_close_it_demo": (
                 "the yellow cup."
             ),
-            "KITCHEN_SCENE8_put_both_moka_pots_on_the_stove_demo": "the moka pot.",
+            "KITCHEN_SCENE8_put_both_moka_pots_on_the_stove_demo": (
+                "the left silver moka pot. the right silver moka pot."
+            ),
             "LIVING_ROOM_SCENE1_put_both_the_alphabet_soup_and_the_cream_cheese_box_in_the_basket_demo": (
                 "the basket."
             ),
@@ -86,7 +94,7 @@ def get_task_to_prompt_dict() -> dict[str, dict[str, str]]:
                 "the pink-white plate."
             ),
             "STUDY_SCENE1_pick_up_the_book_and_place_it_in_the_back_compartment_of_the_caddy_demo": (
-                "the book. the caddy."
+                "the black book. the wooden caddy."
             ),
         },
         "real_atm_qpos": {

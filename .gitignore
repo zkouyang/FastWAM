@@ -42,6 +42,7 @@ evaluate_results/
 *.pyc
 *Thumbs.db
 *.patch
+*.bak
 
 # Credential information that should never be checked in
 credentials
@@ -129,6 +130,7 @@ target/
 
 # Third party
 /third_party/sam3/
+/third_party/sam2/
 /third_party/Video-Depth-Anything/
 /third_party/grounding_dino_torch27/gdino_checkpoints/
 /third_party/grounding_dino_torch27/grounding_dino/.asset/
