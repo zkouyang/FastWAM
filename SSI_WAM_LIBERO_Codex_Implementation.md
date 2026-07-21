@@ -597,34 +597,34 @@ with torch.no_grad():
 
 ### 数据
 
-- [ ] 四类标签与 RGB 帧对齐
-- [ ] bbox/trajectory 坐标约定明确
-- [ ] mask 和 bbox 的实例对应关系明确
-- [ ] 时间 horizon 正确
+- [x] 四类标签与 RGB 帧对齐
+- [x] bbox/trajectory 坐标约定明确
+- [x] mask 和 bbox 的实例对应关系明确
+- [x] 时间 horizon 正确
 
 ### 模型
 
-- [ ] 四个 branch 可独立开关
-- [ ] 四个 branch 均复用 Video-DiT-like 接口
-- [ ] BBox 与 Mask branch 完全独立
-- [ ] Trajectory branch 正确适配 ATM Track Transformer
-- [ ] Action Branch 不读取显式辅助预测
-- [ ] 辅助 loss 能更新 Action Branch 依赖的共享世界表示
+- [x] 四个 branch 可独立开关
+- [x] 四个 branch 均复用 Video-DiT-like 接口
+- [x] BBox 与 Mask branch 完全独立
+- [x] Trajectory branch 正确适配 ATM Track Transformer
+- [x] Action Branch 不读取显式辅助预测
+- [x] 辅助 loss 能更新 Action Branch 依赖的共享世界表示
 
 ### 训练
 
-- [ ] 六项 loss 命名和日志一致
-- [ ] 每个辅助 loss 可独立 backward
-- [ ] Full loss 可联合 backward
-- [ ] AMP/DDP/checkpoint 正常
-- [ ] baseline 配置可复现原 Fast-WAM
+- [x] 六项 loss 命名和日志一致
+- [x] 每个辅助 loss 可独立 backward
+- [x] Full loss 可联合 backward
+- [x] AMP/DDP/checkpoint 正常
+- [x] baseline 配置可复现原 Fast-WAM
 
 ### 推理
 
-- [ ] 不调用四个辅助 branch/head
-- [ ] action 输出接口与原 Fast-WAM 一致
-- [ ] 推理 latency 基本不增加
-- [ ] Full checkpoint 可在关闭辅助 branch 时部署
+- [x] 不调用四个辅助 branch/head
+- [x] action 输出接口与原 Fast-WAM 一致
+- [x] 推理 latency 基本不增加
+- [x] Full checkpoint 可在关闭辅助 branch 时部署
 
 ---
 

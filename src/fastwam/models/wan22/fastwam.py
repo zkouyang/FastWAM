@@ -8,7 +8,15 @@ from PIL import Image
 from fastwam.utils.logging_config import get_logger
 
 from .action_dit import ActionDiT
+from .auxiliary.factory import build_auxiliary_branches
 from .helpers.loader import load_wan22_ti2v_5b_components
+from fastwam.losses import (
+    bbox_hungarian_loss,
+    depth_regression_loss,
+    mask_hungarian_loss,
+    prepare_trajectory_targets,
+    trajectory_loss,
+)
 from .mot import MoT
 from .schedulers.scheduler_continuous import WanContinuousFlowMatchScheduler
 
@@ -38,6 +46,8 @@ class FastWAM(torch.nn.Module):
         action_num_train_timesteps: int = 1000,
         loss_lambda_video: float = 1.0,
         loss_lambda_action: float = 1.0,
+        auxiliary_config: Optional[dict[str, Any]] = None,
+        auxiliary_loss_weights: Optional[dict[str, float]] = None,
     ):
         super().__init__()
         self.video_expert = video_expert
@@ -84,6 +94,14 @@ class FastWAM(torch.nn.Module):
         self.torch_dtype = torch_dtype
         self.loss_lambda_video = float(loss_lambda_video)
         self.loss_lambda_action = float(loss_lambda_action)
+        self.auxiliary_config = dict(auxiliary_config or {})
+        self.compute_auxiliary = bool(self.auxiliary_config.get("compute_auxiliary", True))
+        self.auxiliary_branch_names = tuple(
+            name for name in ("depth", "bbox", "mask", "trajectory") if name in self.mot.mixtures
+        )
+        default_aux_weights = {name: 0.1 for name in self.auxiliary_branch_names}
+        default_aux_weights.update(auxiliary_loss_weights or {})
+        self.auxiliary_loss_weights = default_aux_weights
 
         self.to(self.device)
 
@@ -111,6 +129,8 @@ class FastWAM(torch.nn.Module):
         action_num_train_timesteps: int = 1000,
         loss_lambda_video: float = 1.0,
         loss_lambda_action: float = 1.0,
+        auxiliary_config: dict[str, Any] | None = None,
+        auxiliary_loss_weights: dict[str, float] | None = None,
     ):
         if video_dit_config is None:
             raise ValueError("`video_dit_config` is required for FastWAM.from_wan22_pretrained().")
@@ -144,8 +164,13 @@ class FastWAM(torch.nn.Module):
         if int(len(action_expert.blocks)) != int(len(video_expert.blocks)):
             raise ValueError("ActionDiT `num_layers` must match video expert.")
 
+        auxiliary_branches, auxiliary_config = build_auxiliary_branches(
+            auxiliary_config, video_expert=video_expert
+        )
+        for branch in auxiliary_branches.values():
+            branch.to(device=device, dtype=torch_dtype)
         mot = MoT(
-            mixtures={"video": video_expert, "action": action_expert},
+            mixtures={"video": video_expert, "action": action_expert, **auxiliary_branches},
             mot_checkpoint_mixed_attn=mot_checkpoint_mixed_attn,
         )
 
@@ -168,6 +193,8 @@ class FastWAM(torch.nn.Module):
             action_num_train_timesteps=action_num_train_timesteps,
             loss_lambda_video=loss_lambda_video,
             loss_lambda_action=loss_lambda_action,
+            auxiliary_config=auxiliary_config,
+            auxiliary_loss_weights=auxiliary_loss_weights,
         )
         model.model_paths = {
             "video_dit": components.dit_path,
@@ -406,6 +433,49 @@ class FastWAM(torch.nn.Module):
         mask[video_seq_len:, :first_frame_tokens] = True
         return mask
 
+    @torch.no_grad()
+    def _build_training_attention_mask(
+        self,
+        *,
+        seq_lens: dict[str, int],
+        video_tokens_per_frame: int,
+        device: torch.device,
+    ) -> torch.Tensor:
+        """Structured MoT mask for active training experts.
+
+        Video keeps its original attention policy. Action and every auxiliary
+        expert attend to their own tokens plus the clean first-frame Video K/V.
+        They never attend to one another, so explicit auxiliary representations
+        and predictions cannot leak into Action.
+        """
+
+        active = [name for name in self.mot.expert_order if name in seq_lens]
+        offsets: dict[str, tuple[int, int]] = {}
+        cursor = 0
+        for name in active:
+            offsets[name] = (cursor, cursor + int(seq_lens[name]))
+            cursor += int(seq_lens[name])
+        mask = torch.zeros((cursor, cursor), dtype=torch.bool, device=device)
+        video_start, video_end = offsets["video"]
+        mask[video_start:video_end, video_start:video_end] = self.video_expert.build_video_to_video_mask(
+            video_seq_len=seq_lens["video"],
+            video_tokens_per_frame=video_tokens_per_frame,
+            device=device,
+        )
+        first_frame_end = video_start + min(video_tokens_per_frame, seq_lens["video"])
+        for name in active:
+            if name == "video":
+                continue
+            start, end = offsets[name]
+            mask[start:end, start:end] = True
+            mask[start:end, video_start:first_frame_end] = True
+        return mask
+
+    def get_auxiliary_branch(self, name: str) -> nn.Module:
+        if name not in self.auxiliary_branch_names:
+            raise KeyError(f"Auxiliary branch {name!r} is disabled")
+        return self.mot.mixtures[name]
+
     def _compute_video_loss_per_sample(
         self,
         pred_video: torch.Tensor,
@@ -445,7 +515,7 @@ class FastWAM(torch.nn.Module):
         valid_sum = valid.sum(dim=1).clamp(min=1.0)
         return (video_loss_token * valid).sum(dim=1) / valid_sum
 
-    def training_loss(self, sample, tiled: bool = False):
+    def training_loss(self, sample, tiled: bool = False, compute_auxiliary: Optional[bool] = None):
         inputs = self.build_inputs(sample, tiled=tiled)
         input_latents = inputs["input_latents"]
         batch_size = input_latents.shape[0]
@@ -495,36 +565,73 @@ class FastWAM(torch.nn.Module):
         video_tokens = video_pre["tokens"]
         action_tokens = action_pre["tokens"]
 
-        attention_mask = self._build_mot_attention_mask(
-            video_seq_len=video_tokens.shape[1],
-            action_seq_len=action_tokens.shape[1],
+        use_auxiliary = self.compute_auxiliary if compute_auxiliary is None else bool(compute_auxiliary)
+        use_auxiliary = use_auxiliary and self.training and bool(self.auxiliary_branch_names)
+        pre_states: dict[str, dict[str, Any]] = {"video": video_pre, "action": action_pre}
+        trajectory_targets = None
+        if use_auxiliary:
+            if "depth" in self.auxiliary_branch_names:
+                if "depth" not in sample:
+                    raise KeyError("Depth branch is enabled but sample['depth'] is missing")
+                depth_horizon = int(sample["depth"].shape[1])
+                pre_states["depth"] = self.get_auxiliary_branch("depth").pre_dit(
+                    batch_size=batch_size,
+                    num_frames=depth_horizon,
+                    context=context,
+                    context_mask=context_mask,
+                )
+            if "bbox" in self.auxiliary_branch_names:
+                if "boxes" not in sample:
+                    raise KeyError("BBox branch is enabled but sample['boxes'] is missing")
+                bbox_horizon = len(sample["boxes"][0])
+                pre_states["bbox"] = self.get_auxiliary_branch("bbox").pre_dit(
+                    batch_size=batch_size,
+                    num_frames=bbox_horizon,
+                    context=context,
+                    context_mask=context_mask,
+                )
+            if "mask" in self.auxiliary_branch_names:
+                if "masks" not in sample:
+                    raise KeyError("Mask branch is enabled but sample['masks'] is missing")
+                mask_horizon = len(sample["masks"][0])
+                pre_states["mask"] = self.get_auxiliary_branch("mask").pre_dit(
+                    batch_size=batch_size,
+                    num_frames=mask_horizon,
+                    context=context,
+                    context_mask=context_mask,
+                )
+            if "trajectory" in self.auxiliary_branch_names:
+                required = {"trajectories", "traj_visibility", "traj_query_points"}
+                missing = sorted(required - set(sample))
+                if missing:
+                    raise KeyError(f"Trajectory branch is enabled but sample fields are missing: {missing}")
+                trajectory_branch = self.get_auxiliary_branch("trajectory")
+                trajectory_targets = prepare_trajectory_targets(
+                    sample, num_points=trajectory_branch.num_points, device=self.device
+                )
+                trajectory_horizon = int(trajectory_targets["coords"].shape[2])
+                pre_states["trajectory"] = trajectory_branch.pre_dit(
+                    query_points=trajectory_targets["query_points"].to(dtype=context.dtype),
+                    num_frames=trajectory_horizon,
+                    context=context,
+                    context_mask=context_mask,
+                )
+
+        seq_lens = {name: int(state["tokens"].shape[1]) for name, state in pre_states.items()}
+        attention_mask = self._build_training_attention_mask(
+            seq_lens=seq_lens,
             video_tokens_per_frame=int(video_pre["meta"]["tokens_per_frame"]),
             device=video_tokens.device,
         )
         tokens_out = self.mot(
-            embeds_all={
-                "video": video_tokens,
-                "action": action_tokens,
-            },
+            embeds_all={name: state["tokens"] for name, state in pre_states.items()},
             attention_mask=attention_mask,
-            freqs_all={
-                "video": video_pre["freqs"],
-                "action": action_pre["freqs"],
-            },
+            freqs_all={name: state["freqs"] for name, state in pre_states.items()},
             context_all={
-                "video": {
-                    "context": video_pre["context"],
-                    "mask": video_pre["context_mask"],
-                },
-                "action": {
-                    "context": action_pre["context"],
-                    "mask": action_pre["context_mask"],
-                },
+                name: {"context": state["context"], "mask": state["context_mask"]}
+                for name, state in pre_states.items()
             },
-            t_mod_all={
-                "video": video_pre["t_mod"],
-                "action": action_pre["t_mod"],
-            },
+            t_mod_all={name: state["t_mod"] for name, state in pre_states.items()},
         )
 
         pred_video = self.video_expert.post_dit(tokens_out["video"], video_pre)
@@ -560,10 +667,81 @@ class FastWAM(torch.nn.Module):
         )
         loss_action = (action_loss_per_sample * action_weight).mean()
 
+        zero = loss_action.new_zeros(())
+        auxiliary_losses: dict[str, torch.Tensor] = {
+            "depth": zero,
+            "bbox": zero,
+            "mask": zero,
+            "trajectory": zero,
+        }
+        if use_auxiliary:
+            aux_cfg = self.auxiliary_config
+            if "depth" in pre_states:
+                pred_depth = self.get_auxiliary_branch("depth").post_dit(
+                    tokens_out["depth"], pre_states["depth"]
+                )
+                depth_cfg = dict(aux_cfg.get("depth", {}))
+                auxiliary_losses["depth"] = depth_regression_loss(
+                    pred_depth,
+                    sample["depth"],
+                    confidence=sample.get("depth_confidence"),
+                    alpha_grad=float(depth_cfg.get("alpha_grad", 0.0)),
+                )
+            if "bbox" in pre_states:
+                pred_bbox = self.get_auxiliary_branch("bbox").post_dit(
+                    tokens_out["bbox"], pre_states["bbox"]
+                )
+                bbox_cfg = dict(aux_cfg.get("bbox", {}))
+                auxiliary_losses["bbox"] = bbox_hungarian_loss(
+                    pred_bbox,
+                    sample["boxes"],
+                    sample.get("box_labels"),
+                    beta_l1=float(bbox_cfg.get("beta_l1", 5.0)),
+                    beta_giou=float(bbox_cfg.get("beta_giou", 2.0)),
+                )
+            if "mask" in pre_states:
+                pred_masks = self.get_auxiliary_branch("mask").post_dit(
+                    tokens_out["mask"], pre_states["mask"]
+                )
+                mask_cfg = dict(aux_cfg.get("mask", {}))
+                auxiliary_losses["mask"] = mask_hungarian_loss(
+                    pred_masks,
+                    sample["masks"],
+                    beta_dice=float(mask_cfg.get("beta_dice", 1.0)),
+                )
+            if "trajectory" in pre_states:
+                assert trajectory_targets is not None
+                pred_trajectory = self.get_auxiliary_branch("trajectory").post_dit(
+                    tokens_out["trajectory"], pre_states["trajectory"]
+                )
+                trajectory_cfg = dict(aux_cfg.get("trajectory", {}))
+                auxiliary_losses["trajectory"] = trajectory_loss(
+                    pred_trajectory,
+                    trajectory_targets,
+                    beta_vis=float(trajectory_cfg.get("beta_vis", 1.0)),
+                )
+
+        named_losses = {
+            "video": loss_video,
+            "action": loss_action,
+            **auxiliary_losses,
+        }
+        non_finite = [name for name, value in named_losses.items() if not torch.isfinite(value).all()]
+        if non_finite:
+            raise FloatingPointError(f"Non-finite FastWAM losses: {non_finite}")
         loss_total = self.loss_lambda_video * loss_video + self.loss_lambda_action * loss_action
+        for name, value in auxiliary_losses.items():
+            loss_total = loss_total + float(self.auxiliary_loss_weights.get(name, 0.1)) * value
+        if not torch.isfinite(loss_total).all():
+            raise FloatingPointError("Non-finite FastWAM total loss")
         loss_dict = {
             "loss_video": self.loss_lambda_video * float(loss_video.detach().item()),
             "loss_action": self.loss_lambda_action * float(loss_action.detach().item()),
+            **{
+                f"loss_{name}": float(self.auxiliary_loss_weights.get(name, 0.1)) * float(value.detach().item())
+                for name, value in auxiliary_losses.items()
+            },
+            "loss_total": float(loss_total.detach().item()),
         }
         return loss_total, loss_dict
 
@@ -1090,6 +1268,8 @@ class FastWAM(torch.nn.Module):
             "mot": self.mot.state_dict(),
             "step": step,
             "torch_dtype": str(self.torch_dtype),
+            "auxiliary_config": self.auxiliary_config,
+            "auxiliary_loss_weights": self.auxiliary_loss_weights,
         }
         if self.proprio_encoder is not None:
             payload["proprio_encoder"] = self.proprio_encoder.state_dict()

@@ -339,6 +339,8 @@ class WanVideoDiT(torch.nn.Module):
         super().__init__()
         self.hidden_dim = hidden_dim
         self.in_dim = in_dim
+        self.ffn_dim = ffn_dim
+        self.text_dim = text_dim
         self.freq_dim = freq_dim
         self.patch_size = patch_size
         self.num_heads = num_heads

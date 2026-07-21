@@ -56,3 +56,49 @@ action_scheduler:
 
 loss:
   lambda_action: 1.0
+  lambda_video: 1.0
+  auxiliary:
+    depth: 0.1
+    bbox: 0.1
+    mask: 0.1
+    trajectory: 0.1
+
+# Training-only independent spatial experts. `enabled: false` is the exact
+# FastWAM baseline: no auxiliary modules/tokens/losses are constructed.
+auxiliary:
+  enabled: false
+  compute_auxiliary: true
+  common:
+    hidden_dim: 256
+    ffn_dim: 1024
+    max_frames: 64
+    max_tokens: 4096
+    use_gradient_checkpointing: ${model.mot_checkpoint_mixed_attn}
+  depth:
+    enabled: false
+    init_from_video_dit: false
+    output_size: [128, 128]
+    decoder_dim: 32
+    decoder_grid: [8, 8]
+    alpha_grad: 0.0
+  bbox:
+    enabled: false
+    init_from_video_dit: false
+    num_queries: 16
+    num_classes: 1
+    beta_l1: 5.0
+    beta_giou: 2.0
+  mask:
+    enabled: false
+    init_from_video_dit: false
+    num_queries: 16
+    output_size: [128, 128]
+    mask_dim: 32
+    feature_grid: [8, 8]
+    beta_dice: 1.0
+  trajectory:
+    enabled: false
+    init_from_video_dit: false
+    num_points: 64
+    horizon: null
+    beta_vis: 1.0

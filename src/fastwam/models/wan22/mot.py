@@ -452,13 +452,17 @@ class MoT(nn.Module):
         context_all: Dict[str, Optional[dict]],
         t_mod_all: Dict[str, torch.Tensor],
     ):
-        missing = [k for k in self.expert_order if k not in embeds_all]
-        if missing:
-            raise ValueError(f"Missing expert tokens for {missing}")
-        missing = [k for k in self.expert_order if k not in freqs_all]
+        unknown = [k for k in embeds_all if k not in self.mixtures]
+        if unknown:
+            raise ValueError(f"Unknown experts in embeds_all: {unknown}")
+        active_expert_order = [name for name in self.expert_order if name in embeds_all]
+        missing_required = [name for name in ("video", "action") if name not in active_expert_order]
+        if missing_required:
+            raise ValueError(f"Missing required expert tokens for {missing_required}")
+        missing = [k for k in active_expert_order if k not in freqs_all]
         if missing:
             raise ValueError(f"Missing expert freqs for {missing}")
-        missing = [k for k in self.expert_order if k not in t_mod_all]
+        missing = [k for k in active_expert_order if k not in t_mod_all]
         if missing:
             raise ValueError(f"Missing expert t_mod for {missing}")
 
@@ -476,7 +480,7 @@ class MoT(nn.Module):
             cached = {}
             seq_lens = []
 
-            for name in self.expert_order:
+            for name in active_expert_order:
                 expert = self.mixtures[name]
                 block = expert.blocks[layer_idx]
                 x = tokens_all[name]
@@ -530,7 +534,7 @@ class MoT(nn.Module):
             mixed = self._mixed_attention(q_cat=q_cat, k_cat=k_cat, v_cat=v_cat, attention_mask=attention_mask)
 
             start = 0
-            for name, seq_len in zip(self.expert_order, seq_lens):
+            for name, seq_len in zip(active_expert_order, seq_lens):
                 # 4. split mixed attention output and apply post-attention blocks for each expert
                 end = start + seq_len
                 mixed_slice = mixed[:, start:end, :]

@@ -531,6 +531,102 @@ pads only the trajectory point dimension.
 This design keeps preprocessing independent from a fixed action horizon or
 video stride.
 
+## Cache validation
+
+`scripts/validate_libero_auxiliary_cache.py` is a read-only validator, not a
+preprocessor or visualizer. It first checks that every LIBERO episode has all
+three cache files, then deeply inspects a deterministic sample for complete
+stride-1 timelines, camera ordering, finite tensors, ragged bbox offsets,
+mask/box instance counts, trajectory shapes, and visibility shapes:
+
+```bash
+conda run -n fastwam python scripts/validate_libero_auxiliary_cache.py \
+  --sample-count 24
+```
+
+The current caches pass coverage for all 1712 episodes and deep validation for
+24 deterministic random episodes (seed 42).
+
+## Model, training, and inference integration
+
+Four independent training-only experts now live under:
+
+```text
+src/fastwam/models/wan22/auxiliary/
+├── depth_branch.py
+├── bbox_branch.py
+├── mask_branch.py
+└── trajectory_branch.py
+```
+
+Each expert owns its text/timestep projections, Video-DiT blocks, task tokens,
+and output head. The common base is only a constructor/interface helper; it
+does not create a unified SSI encoder and the branches do not share parameters.
+
+The task outputs and losses are:
+
+- Depth: `[B,T,1,H,W]`, SmoothL1 plus optional gradient loss.
+- BBox: `[B,T,Q,C]` logits and normalized `[B,T,Q,4]` `cx,cy,w,h`, with
+  classification + Hungarian-matched L1/GIoU loss.
+- Mask: independent query-to-mask logits `[B,T,Q,H,W]`, with its own
+  BCE/Dice Hungarian matching. It never reads BBox predictions.
+- Trajectory: ATM-style repeated first-frame query tokens, deterministic
+  double-grid point selection, `[B,N,T,2]` coordinates, `[B,N,T]` visibility,
+  and masked coordinate/visibility losses.
+
+During mixed MoT training, Action and each auxiliary expert can read only
+their own tokens and the clean first-frame Video K/V. Auxiliary experts cannot
+read one another, and Action cannot read auxiliary tokens or head outputs.
+This gives every auxiliary loss a gradient path into the Video world
+representation used by Action inference without changing the action input.
+
+`configs/model/fastwam.yaml` contains independent `enabled` flags and branch
+settings. The repository default remains the exact baseline:
+
+```yaml
+model:
+  auxiliary:
+    enabled: false
+```
+
+For Full training, override the top-level and four branch flags:
+
+```bash
+python scripts/train.py \
+  data.train.auxiliary_labels.enabled=true \
+  model.auxiliary.enabled=true \
+  model.auxiliary.depth.enabled=true \
+  model.auxiliary.bbox.enabled=true \
+  model.auxiliary.mask.enabled=true \
+  model.auxiliary.trajectory.enabled=true
+```
+
+The combined objective logs `loss_video`, `loss_action`, `loss_depth`,
+`loss_bbox`, `loss_mask`, `loss_trajectory`, and `loss_total`. Auxiliary
+parameters are registered inside `model.dit`, so the existing optimizer,
+gradient accumulation, AMP, DDP, and checkpoint code includes them without a
+second optimizer.
+
+`infer_action()` still uses only Video prefill plus cached Video K/V and Action
+denoising. Its inputs and `[action_horizon, action_dim]` output are unchanged;
+it never creates or calls auxiliary tokens/heads. A Full checkpoint can be
+loaded with all auxiliary branches disabled because checkpoint loading is
+non-strict for optional MoT experts.
+
+### Verification
+
+Run the project-owned tests (the repository's `third_party/` trees contain
+unrelated tests with additional simulator dependencies):
+
+```bash
+conda run -n fastwam python -m pytest -q tests
+```
+
+The suite covers aligned data loading/collation plus tiny real-DiT smoke tests
+for every branch, isolated auxiliary-to-Video gradients, Full AMP and DDP
+backward, exact baseline behavior when auxiliary computation is off,
+checkpoint deployment, and inference-time branch skipping.
+
 ## Environment notes
 
 LIBERO videos in the current FastWAM dataset are AV1-encoded mp4 files. A working video decoder is required. If decoding fails, install a suitable backend, for example:
@@ -560,11 +656,11 @@ or use a system FFmpeg build with AV1 support, such as `libdav1d` or `libaom`.
 
 ### Model integration
 
-- [ ] Add an SSI branch / SSI expert module.
-- [ ] Add depth, bbox, and trajectory prediction heads.
-- [ ] Add SSI auxiliary losses.
-- [ ] Ensure the action branch does not read SSI tokens during deployment.
-- [ ] Keep deployment path identical to FastWAM action inference except for checkpoint compatibility.
+- [x] Add four independent Depth/BBox/Mask/Trajectory DiT experts and heads.
+- [x] Add depth, DETR-style bbox, query-mask, and ATM-style trajectory losses.
+- [x] Route auxiliary gradients through clean-frame Video K/V shared with Action.
+- [x] Ensure the action branch does not read auxiliary tokens or predictions.
+- [x] Keep deployment action inference unchanged and support Full checkpoints with auxiliaries disabled.
 
 ### Experiments
 

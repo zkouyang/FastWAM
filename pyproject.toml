@@ -33,6 +33,7 @@ dependencies = [
   "regex==2025.11.3",
   "rich==14.2.0",
   "safetensors==0.5.3",
+  "scipy==1.11.4",
   "termcolor==2.5.0",
   "torch==2.7.1+cu128",
   "torchcodec==0.5",
@@ -42,6 +43,9 @@ dependencies = [
   "typing-extensions==4.15.0",
   "wandb==0.23.1",
 ]
+
+[project.optional-dependencies]
+test = ["pytest==9.1.1"]
 
 [tool.setuptools.package-dir]
 "" = "src"
