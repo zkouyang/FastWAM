@@ -66,6 +66,7 @@ class FastWAMProcessor(BaseProcessor):
         self._normalizer = None
 
         self.tokenizer = tokenizer
+        self.return_source_identity = False
         if delta_action_dim_mask is None:
             self.delta_action_dim_mask = None
         else:
@@ -106,6 +107,11 @@ class FastWAMProcessor(BaseProcessor):
 
     def eval(self):
         self._is_train = False
+        return self
+
+    def set_return_source_identity(self, enabled: bool):
+        """Keep cache-address fields in processed samples when requested."""
+        self.return_source_identity = bool(enabled)
         return self
 
     def set_normalizer_from_stats(self, dataset_stats: Dict[str, Any] = None):
@@ -276,6 +282,12 @@ class FastWAMProcessor(BaseProcessor):
         assert sample["proprio"].shape[-1] == self.proprio_output_dim
 
         sample["idx"] = data["idx"]
+        if self.return_source_identity:
+            # Address episode-level auxiliary caches after regular processing.
+            for key in ("dataset_index", "episode_index", "frame_index"):
+                if key not in data:
+                    raise KeyError(f"LeRobot sample is missing required identity field: {key}")
+                sample[key] = data[key]
 
         # sample = self.tokenizer(sample)
         

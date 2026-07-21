@@ -14,6 +14,11 @@ from hydra.utils import instantiate
 from .base_lerobot_dataset import BaseLerobotDataset
 from .utils.normalizer import save_dataset_stats_to_json, load_dataset_stats_from_json
 from ..dataset_utils import ResizeSmallestSideAspectPreserving, CenterCrop, Normalize
+from ..auxiliary_labels import (
+    AuxiliaryLabelLoadingError,
+    LiberoAuxiliaryLabelLoader,
+    auxiliary_collate_fn,
+)
 from fastwam.utils.logging_config import get_logger
 from fastwam.utils import misc, pytorch_utils
 from accelerate import PartialState
@@ -42,6 +47,7 @@ class RobotVideoDataset(torch.utils.data.Dataset):
         max_padding_retry: int = 3,
         concat_multi_camera: str = "horizontal", # "horizontal", "vertical", "robotwin", or None
         override_instruction: Optional[str] = None, # whether to hardcode a specific instruction for all samples, for debugging
+        auxiliary_labels=None,
     ):
         self.lerobot_dataset = BaseLerobotDataset(
             dataset_dirs=dataset_dirs,
@@ -72,6 +78,35 @@ class RobotVideoDataset(torch.utils.data.Dataset):
         self.max_padding_retry = max_padding_retry
         self.concat_multi_camera = concat_multi_camera
         self.override_instruction = override_instruction
+
+        camera_keys = [
+            f"observation.images.{meta['key']}" if meta["key"] != "default" else "observation.images"
+            for meta in OmegaConf.to_container(shape_meta, resolve=True)["images"]
+        ]
+        self.auxiliary_label_loader = LiberoAuxiliaryLabelLoader(
+            config=auxiliary_labels,
+            dataset_dirs=dataset_dirs,
+            camera_keys=camera_keys,
+            video_size=video_size,
+            concat_multi_camera=concat_multi_camera,
+        )
+        # The trainer discovers this callable and passes it to DataLoader.  It
+        # is also safe for the baseline because the custom path is only needed
+        # when auxiliary labels are enabled.
+        self.collate_fn = (
+            auxiliary_collate_fn if self.auxiliary_label_loader.enabled else None
+        )
+        if self.lerobot_dataset.processor is not None:
+            set_identity = getattr(
+                self.lerobot_dataset.processor, "set_return_source_identity", None
+            )
+            if set_identity is not None:
+                set_identity(self.auxiliary_label_loader.enabled)
+            elif self.auxiliary_label_loader.enabled:
+                raise TypeError(
+                    "Auxiliary labels require a processor that preserves dataset_index, "
+                    "episode_index, and frame_index."
+                )
 
         self.resize_transform = ResizeSmallestSideAspectPreserving(
             args={"img_w": self.video_size[1], "img_h": self.video_size[0]},
@@ -138,6 +173,7 @@ class RobotVideoDataset(torch.utils.data.Dataset):
             sample_idx = np.random.randint(len(self.lerobot_dataset))
         
         image_is_pad = sample["image_is_pad"]
+        full_image_is_pad = image_is_pad.clone()
 
         video = sample["pixel_values"]  # [T, C, H, W] or [num_cameras, T, C, H, W]
         num_cameras = 1
@@ -219,6 +255,31 @@ class RobotVideoDataset(torch.utils.data.Dataset):
         # NOTE: to keep consistent with wan2.2's behavior
         context[~context_mask] = 0.0
         context_mask = torch.ones_like(context_mask)
+
+        auxiliary = {}
+        if self.auxiliary_label_loader.enabled:
+            start_frame = int(torch.as_tensor(sample["frame_index"]).item())
+            raw_frame_indices = start_frame + (
+                torch.arange(self.num_frames, dtype=torch.int64) * self.lerobot_dataset.global_sample_stride
+            )
+            valid = ~full_image_is_pad.to(dtype=torch.bool)
+            if bool(valid.any().item()):
+                last_valid_frame = raw_frame_indices[valid][-1]
+            else:
+                last_valid_frame = raw_frame_indices[0]
+            raw_frame_indices[~valid] = last_valid_frame
+            try:
+                auxiliary = self.auxiliary_label_loader.load(
+                    dataset_index=sample["dataset_index"],
+                    episode_index=sample["episode_index"],
+                    frame_indices=raw_frame_indices[self.video_sample_indices],
+                )
+            except Exception as exc:
+                raise AuxiliaryLabelLoadingError(
+                    "Failed to align auxiliary labels for "
+                    f"dataset={sample['dataset_index']} episode={sample['episode_index']} "
+                    f"start_frame={start_frame}"
+                ) from exc
         
         data = {
             "video": video,
@@ -231,6 +292,15 @@ class RobotVideoDataset(torch.utils.data.Dataset):
             "action_is_pad": sample["action_is_pad"],
             "proprio_is_pad": sample["proprio_is_pad"],
         }
+        if self.auxiliary_label_loader.enabled:
+            data.update(
+                {
+                    "dataset_index": sample["dataset_index"],
+                    "episode_index": sample["episode_index"],
+                    "frame_index": sample["frame_index"],
+                }
+            )
+        data.update(auxiliary)
         return data
 
     def _get_cached_text_context(self, prompt: str):
@@ -271,6 +341,9 @@ class RobotVideoDataset(torch.utils.data.Dataset):
         try:
             data = self._get(idx)
         except Exception as e:
+            if isinstance(e, AuxiliaryLabelLoadingError):
+                # Never hide a missing/misaligned label by changing the sample.
+                raise
             print(f"Error processing sample idx {idx}: {e}. Returning a random sample instead.")
             # trace back
             print(traceback.format_exc())

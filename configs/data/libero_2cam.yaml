@@ -34,6 +34,19 @@ train:
   is_training_set: true
   skip_padding_as_possible: false
   concat_multi_camera: "horizontal"
+  # Training-time targets only. Keeping this disabled preserves the original
+  # Fast-WAM dataset output and inference behavior exactly.
+  auxiliary_labels:
+    enabled: false
+    load_depth: true
+    load_bbox: true
+    load_mask: true
+    load_trajectory: true
+    depth_cache_dir: ./data/libero_mujoco3.3.2_depth_cache
+    bbox_cache_dir: ./data/libero_mujoco3.3.2_bbox_cache
+    trajectory_cache_dir: ./data/libero_mujoco3.3.2_motion_cache
+    # Per-worker, per-modality decompressed episodes retained in memory.
+    cache_size: 1
   processor:
     _target_: fastwam.datasets.lerobot.processors.fastwam_processor.FastWAMProcessor
     shape_meta: ${data.train.shape_meta}

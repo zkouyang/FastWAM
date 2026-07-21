@@ -24,8 +24,8 @@ scripts/preprocess_libero_motion.py
 ```
 
 These tools generate episode-level supervision labels. Labels are saved over
-the full demonstration timeline, and the training dataset should later slice
-them according to the policy horizon and video stride. Use
+the full demonstration timeline, and the training dataset slices them according
+to the policy horizon and video stride. Use
 `preprocess_libero_bbox.py` for raw ATM-style boxes and confidence scores,
 `preprocess_libero_depth.py` for monocular depth maps, and
 `preprocess_libero_motion.py` for point trajectories.
@@ -476,7 +476,11 @@ The hdf5 export path is:
 
 ## Training-time slicing
 
-Each cache is episode-level. Training code should dynamically slice it.
+Each cache is episode-level. Training-time slicing is implemented in
+`src/fastwam/datasets/auxiliary_labels.py` and is enabled through
+`data.train.auxiliary_labels.enabled=true`. The complete tensor, coordinate,
+padding, and collator contract is documented in
+`docs/libero_auxiliary_data.md`.
 
 For FastWAM LIBERO defaults:
 
@@ -486,7 +490,8 @@ action_video_freq_ratio = 4
 video_sample_indices = [0, 4, 8, 12, 16, 20, 24, 28, 32]
 ```
 
-Given a sampled window start index:
+Given a sampled window start index, the loader derives the same raw timeline as
+RGB (including episode-end replication):
 
 ```python
 video_indices = start + np.arange(0, 33, 4)
@@ -494,7 +499,6 @@ video_indices = start + np.arange(0, 33, 4)
 depth_label = depth[:, video_indices]
 
 traj = motion_points[:, video_indices]
-traj_delta = traj - traj[:, :1]
 traj_vis = motion_visibility[:, video_indices]
 ```
 
@@ -519,14 +523,13 @@ for cam in range(len(camera_keys)):
     window_scores.append(cam_scores)
 ```
 
-If a dense tensor is required by the model, pad each frame to the configured
-maximum bbox count and concatenate confidence as the fifth column:
+The loader additionally applies the RGB camera composition and final
+resize/crop. Boxes are returned as normalized `cx,cy,w,h`; masks remain aligned
+one-to-one with boxes. The custom collator keeps per-frame instances ragged and
+pads only the trajectory point dimension.
 
-```text
-[x1, y1, x2, y2, confidence]
-```
-
-This design keeps preprocessing independent from a fixed action horizon or video stride.
+This design keeps preprocessing independent from a fixed action horizon or
+video stride.
 
 ## Environment notes
 
@@ -549,11 +552,11 @@ or use a system FFmpeg build with AV1 support, such as `libdav1d` or `libaom`.
 
 ### Dataset integration
 
-- [ ] Add dataset wrappers that load `.depth.npz` and `.motion.npz` files.
-- [ ] Add a bbox-aware dataset wrapper that loads `.bbox.npz` files and pads ragged bbox labels.
-- [ ] Implement training-time slicing from episode-level labels to window-level supervision.
-- [ ] Align label frame indices with FastWAM `video_sample_indices`.
-- [ ] Add validation checks for camera order, episode length, and frame index consistency.
+- [x] Load depth, bbox/mask, and motion episode caches through one dataset adapter.
+- [x] Preserve ragged bbox/mask instances with a dedicated DataLoader collator.
+- [x] Slice episode labels to the Fast-WAM window and `video_sample_indices`.
+- [x] Align two-camera labels with the composed RGB canvas and normalize coordinates.
+- [x] Validate cache coverage, camera order, episode length, frame indices, and schemas.
 
 ### Model integration
 
