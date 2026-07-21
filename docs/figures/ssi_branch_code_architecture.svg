@@ -1,0 +1,210 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1800" height="1220" viewBox="0 0 1800 1220">
+  <defs>
+    <style>
+      .title { font: 700 30px Arial, Helvetica, sans-serif; fill: #172033; }
+      .subtitle { font: 400 16px Arial, Helvetica, sans-serif; fill: #596579; }
+      .section { font: 700 18px Arial, Helvetica, sans-serif; fill: #25324a; letter-spacing: .3px; }
+      .box-title { font: 700 16px Arial, Helvetica, sans-serif; fill: #172033; }
+      .text { font: 400 14px Arial, Helvetica, sans-serif; fill: #344054; }
+      .small { font: 400 12px Arial, Helvetica, sans-serif; fill: #596579; }
+      .code { font: 400 12px "DejaVu Sans Mono", Consolas, monospace; fill: #344054; }
+      .panel { fill: #fbfcfe; stroke: #aab4c4; stroke-width: 1.5; rx: 16; }
+      .existing { fill: #eaf3ff; stroke: #3978bd; stroke-width: 1.7; rx: 10; }
+      .proposed { fill: #f2edff; stroke: #7652b8; stroke-width: 1.7; stroke-dasharray: 7 4; rx: 10; }
+      .data { fill: #edf8f0; stroke: #3f8a58; stroke-width: 1.7; rx: 10; }
+      .action { fill: #fff2e8; stroke: #d36d2f; stroke-width: 1.8; rx: 10; }
+      .loss { fill: #fff8dc; stroke: #b58b16; stroke-width: 1.7; rx: 10; }
+      .cache { fill: #f4f6f8; stroke: #687386; stroke-width: 1.5; rx: 9; }
+      .arrow { fill: none; stroke: #526176; stroke-width: 2; marker-end: url(#arrow); }
+      .arrow-blue { fill: none; stroke: #3978bd; stroke-width: 2.2; marker-end: url(#arrowBlue); }
+      .arrow-purple { fill: none; stroke: #7652b8; stroke-width: 2.2; marker-end: url(#arrowPurple); }
+      .arrow-orange { fill: none; stroke: #d36d2f; stroke-width: 2.2; marker-end: url(#arrowOrange); }
+      .dashed { fill: none; stroke: #7b8798; stroke-width: 1.8; stroke-dasharray: 6 5; marker-end: url(#arrow); }
+    </style>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L0,6 L9,3 z" fill="#526176"/></marker>
+    <marker id="arrowBlue" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L0,6 L9,3 z" fill="#3978bd"/></marker>
+    <marker id="arrowPurple" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L0,6 L9,3 z" fill="#7652b8"/></marker>
+    <marker id="arrowOrange" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L0,6 L9,3 z" fill="#d36d2f"/></marker>
+  </defs>
+
+  <rect width="1800" height="1220" fill="#ffffff"/>
+  <text x="50" y="48" class="title">SSI-WAM Code Architecture</text>
+  <text x="50" y="76" class="subtitle">Offline teacher supervision, three-expert masked MoT training, and label-free action deployment</text>
+
+  <!-- Offline annotation -->
+  <rect x="40" y="100" width="1720" height="235" class="panel"/>
+  <text x="65" y="130" class="section">A. OFFLINE LABEL GENERATION — EXISTING CODE</text>
+
+  <rect x="70" y="160" width="210" height="120" class="data"/>
+  <text x="175" y="188" class="box-title" text-anchor="middle">LIBERO Episodes</text>
+  <text x="175" y="215" class="text" text-anchor="middle">RGB video + actions</text>
+  <text x="175" y="238" class="code" text-anchor="middle">episode_*.mp4</text>
+  <text x="175" y="259" class="code" text-anchor="middle">*.parquet / metadata</text>
+
+  <rect x="350" y="150" width="350" height="52" class="existing"/>
+  <text x="525" y="173" class="box-title" text-anchor="middle">BBox Annotator — Grounding DINO-T</text>
+  <text x="525" y="191" class="code" text-anchor="middle">scripts/preprocess_libero_bbox.py</text>
+  <rect x="350" y="211" width="350" height="52" class="existing"/>
+  <text x="525" y="234" class="box-title" text-anchor="middle">Depth Annotator — DA3</text>
+  <text x="525" y="252" class="code" text-anchor="middle">scripts/preprocess_libero_depth.py</text>
+  <rect x="350" y="272" width="350" height="52" class="existing"/>
+  <text x="525" y="295" class="box-title" text-anchor="middle">Motion Annotator — CoTracker3</text>
+  <text x="525" y="313" class="code" text-anchor="middle">scripts/preprocess_libero_motion.py</text>
+
+  <path d="M280 220 L320 220 L320 176 L350 176" class="arrow"/>
+  <path d="M280 220 L350 237" class="arrow"/>
+  <path d="M280 220 L320 220 L320 298 L350 298" class="arrow"/>
+
+  <rect x="785" y="150" width="310" height="52" class="data"/>
+  <text x="940" y="173" class="box-title" text-anchor="middle">BBox Cache</text>
+  <text x="940" y="192" class="code" text-anchor="middle">boxes[K,4], offsets[C,T+1]</text>
+  <rect x="785" y="211" width="310" height="52" class="data"/>
+  <text x="940" y="234" class="box-title" text-anchor="middle">Depth Cache</text>
+  <text x="940" y="253" class="code" text-anchor="middle">depth[C,T,G,G], confidence</text>
+  <rect x="785" y="272" width="310" height="52" class="data"/>
+  <text x="940" y="295" class="box-title" text-anchor="middle">Motion Cache</text>
+  <text x="940" y="314" class="code" text-anchor="middle">points[C,T,N,2], visibility</text>
+  <path d="M700 176 L785 176" class="arrow"/>
+  <path d="M700 237 L785 237" class="arrow"/>
+  <path d="M700 298 L785 298" class="arrow"/>
+
+  <rect x="1190" y="164" width="510" height="140" class="cache"/>
+  <text x="1445" y="191" class="box-title" text-anchor="middle">SSI Cache Contract</text>
+  <text x="1215" y="219" class="code">key = (suite, task, episode, camera, frame)</text>
+  <text x="1215" y="243" class="code">frame_indices -> align labels with sampled horizon</text>
+  <text x="1215" y="267" class="code">teacher models are never loaded by the policy</text>
+  <text x="1215" y="289" class="small">Files on disk are training targets only.</text>
+  <path d="M1095 176 L1150 176 L1150 205 L1190 205" class="arrow"/>
+  <path d="M1095 237 L1190 237" class="arrow"/>
+  <path d="M1095 298 L1150 298 L1150 269 L1190 269" class="arrow"/>
+
+  <!-- Training architecture -->
+  <rect x="40" y="360" width="1720" height="610" class="panel"/>
+  <text x="65" y="390" class="section">B. JOINT TRAINING — PROPOSED SSI-MoT EXTENSION</text>
+
+  <rect x="70" y="425" width="260" height="178" class="proposed"/>
+  <text x="200" y="454" class="box-title" text-anchor="middle">SSI-Aware Dataset Loader</text>
+  <text x="92" y="482" class="code">video_indices: [Tv]</text>
+  <text x="92" y="506" class="code">rgb:      [B,C,T,3,H,W]</text>
+  <text x="92" y="530" class="code">action:   [B,Ta,Da]</text>
+  <text x="92" y="554" class="code">depth / boxes / tracks</text>
+  <text x="92" y="580" class="small">Loads aligned cache targets</text>
+  <text x="92" y="597" class="small">only during training.</text>
+
+  <rect x="395" y="420" width="315" height="135" class="existing"/>
+  <text x="552" y="449" class="box-title" text-anchor="middle">Video Expert</text>
+  <text x="552" y="473" class="code" text-anchor="middle">video_expert.pre_dit(...)</text>
+  <text x="418" y="500" class="text">Tokens: V0 + future Vf</text>
+  <text x="418" y="523" class="small">Current Wan2.2 DiT expert</text>
+  <text x="418" y="542" class="small">V0 cannot attend to future video.</text>
+
+  <rect x="395" y="579" width="315" height="195" class="proposed"/>
+  <text x="552" y="608" class="box-title" text-anchor="middle">SSI Expert</text>
+  <text x="552" y="632" class="code" text-anchor="middle">ssi_expert.pre_dit(...)</text>
+  <text x="418" y="660" class="text">S0: learned observation queries</text>
+  <text x="418" y="684" class="text">Sf: future structured queries</text>
+  <text x="418" y="708" class="small">camera + spatial + modality + time</text>
+  <text x="418" y="730" class="small">S0 reads V0; labels are targets only.</text>
+  <text x="418" y="752" class="code">proposed: ssi_dit.py</text>
+
+  <rect x="395" y="798" width="315" height="128" class="action"/>
+  <text x="552" y="827" class="box-title" text-anchor="middle">Action Expert</text>
+  <text x="552" y="851" class="code" text-anchor="middle">action_expert.pre_dit(...)</text>
+  <text x="418" y="880" class="text">Noisy action tokens A</text>
+  <text x="418" y="903" class="small">Action diffusion / flow matching</text>
+
+  <path d="M330 472 L395 472" class="arrow-blue"/>
+  <path d="M330 536 L365 536 L365 675 L395 675" class="arrow-purple"/>
+  <path d="M330 570 L350 570 L350 862 L395 862" class="arrow-orange"/>
+
+  <rect x="790" y="420" width="430" height="506" class="proposed"/>
+  <text x="1005" y="450" class="box-title" text-anchor="middle">Three-Expert Mixture of Transformers</text>
+  <text x="1005" y="475" class="code" text-anchor="middle">MoT({video, ssi, action})</text>
+
+  <rect x="825" y="505" width="360" height="95" class="cache"/>
+  <text x="1005" y="531" class="box-title" text-anchor="middle">Per-Layer Mixed Attention</text>
+  <text x="1005" y="557" class="code" text-anchor="middle">Q = [Qv ; Qs ; Qa]</text>
+  <text x="1005" y="580" class="code" text-anchor="middle">K,V = [video ; SSI ; action]</text>
+
+  <text x="845" y="634" class="box-title">Visibility Mask</text>
+  <text x="845" y="658" class="small">Rows are queries; columns are keys.</text>
+  <text x="878" y="694" class="code">        V0   Vf   S0   Sf    A</text>
+  <text x="878" y="720" class="code">V0      [1    0    0    0    0]</text>
+  <text x="878" y="746" class="code">Vf      [1    1    0    0    0]</text>
+  <text x="878" y="772" class="code">S0      [1    0    1    0    0]</text>
+  <text x="878" y="798" class="code">Sf      [1    1    1    1    0]</text>
+  <text x="878" y="824" class="code">A       [1    0    1    0    1]</text>
+  <text x="845" y="859" class="text">Action directly attends to V0 and S0 K/V.</text>
+  <text x="845" y="884" class="small">No path from future video or future SSI to Action.</text>
+
+  <path d="M710 487 L790 487" class="arrow-blue"/>
+  <path d="M710 676 L790 676" class="arrow-purple"/>
+  <path d="M710 862 L790 862" class="arrow-orange"/>
+
+  <rect x="1280" y="430" width="250" height="92" class="proposed"/>
+  <text x="1405" y="459" class="box-title" text-anchor="middle">Depth Head</text>
+  <text x="1405" y="483" class="code" text-anchor="middle">[B,C,T,G,G]</text>
+  <text x="1405" y="505" class="small" text-anchor="middle">confidence-weighted regression</text>
+  <rect x="1280" y="545" width="250" height="92" class="proposed"/>
+  <text x="1405" y="574" class="box-title" text-anchor="middle">BBox Head</text>
+  <text x="1405" y="598" class="code" text-anchor="middle">[B,C,T,Q,4] + objectness</text>
+  <text x="1405" y="620" class="small" text-anchor="middle">Hungarian set matching</text>
+  <rect x="1280" y="660" width="250" height="92" class="proposed"/>
+  <text x="1405" y="689" class="box-title" text-anchor="middle">Motion Head</text>
+  <text x="1405" y="713" class="code" text-anchor="middle">[B,C,M,T,2] + visibility</text>
+  <text x="1405" y="735" class="small" text-anchor="middle">sampled sparse trajectories</text>
+  <path d="M1220 596 L1250 596 L1250 476 L1280 476" class="arrow-purple"/>
+  <path d="M1220 676 L1280 591" class="arrow-purple"/>
+  <path d="M1220 735 L1250 735 L1250 706 L1280 706" class="arrow-purple"/>
+
+  <rect x="1570" y="430" width="160" height="92" class="loss"/>
+  <text x="1650" y="459" class="box-title" text-anchor="middle">Ldepth</text>
+  <text x="1650" y="485" class="small" text-anchor="middle">SmoothL1 + edge</text>
+  <rect x="1570" y="545" width="160" height="92" class="loss"/>
+  <text x="1650" y="574" class="box-title" text-anchor="middle">Lbbox</text>
+  <text x="1650" y="600" class="small" text-anchor="middle">L1 + GIoU + BCE</text>
+  <rect x="1570" y="660" width="160" height="92" class="loss"/>
+  <text x="1650" y="689" class="box-title" text-anchor="middle">Lmotion</text>
+  <text x="1650" y="715" class="small" text-anchor="middle">position + visibility</text>
+  <path d="M1530 476 L1570 476" class="arrow"/>
+  <path d="M1530 591 L1570 591" class="arrow"/>
+  <path d="M1530 706 L1570 706" class="arrow"/>
+
+  <rect x="1280" y="800" width="450" height="126" class="loss"/>
+  <text x="1505" y="831" class="box-title" text-anchor="middle">Joint Objective</text>
+  <text x="1505" y="861" class="code" text-anchor="middle">L = Laction + lambda_v Lvideo</text>
+  <text x="1505" y="885" class="code" text-anchor="middle">  + lambda_d Ldepth + lambda_b Lbbox</text>
+  <text x="1505" y="909" class="code" text-anchor="middle">  + lambda_m Lmotion</text>
+  <path d="M1220 862 L1280 862" class="arrow-orange"/>
+  <path d="M1650 752 L1650 780 L1505 780 L1505 800" class="arrow"/>
+
+  <!-- Deployment -->
+  <rect x="40" y="995" width="1720" height="175" class="panel"/>
+  <text x="65" y="1025" class="section">C. ACTION-ONLY DEPLOYMENT — NO OFFLINE TEACHERS, NO FUTURE GENERATION</text>
+
+  <rect x="80" y="1050" width="220" height="82" class="data"/>
+  <text x="190" y="1080" class="box-title" text-anchor="middle">Current RGB + Language</text>
+  <text x="190" y="1107" class="small" text-anchor="middle">Policy inputs only</text>
+  <rect x="380" y="1050" width="250" height="82" class="existing"/>
+  <text x="505" y="1080" class="box-title" text-anchor="middle">Video Prefix V0</text>
+  <text x="505" y="1107" class="small" text-anchor="middle">single-frame encoding</text>
+  <rect x="710" y="1050" width="250" height="82" class="proposed"/>
+  <text x="835" y="1080" class="box-title" text-anchor="middle">SSI Prefix S0</text>
+  <text x="835" y="1107" class="small" text-anchor="middle">learned queries attend to V0</text>
+  <rect x="1040" y="1050" width="270" height="82" class="cache"/>
+  <text x="1175" y="1080" class="box-title" text-anchor="middle">Layer-wise Prefix K/V Cache</text>
+  <text x="1175" y="1107" class="code" text-anchor="middle">cache = [KV(V0), KV(S0)]</text>
+  <rect x="1390" y="1050" width="300" height="82" class="action"/>
+  <text x="1540" y="1080" class="box-title" text-anchor="middle">Action Denoising</text>
+  <text x="1540" y="1107" class="small" text-anchor="middle">reuses cache at every diffusion step</text>
+  <path d="M300 1091 L380 1091" class="arrow-blue"/>
+  <path d="M630 1091 L710 1091" class="arrow-purple"/>
+  <path d="M960 1091 L1040 1091" class="arrow"/>
+  <path d="M1310 1091 L1390 1091" class="arrow-orange"/>
+
+  <!-- Legend -->
+  <rect x="50" y="1188" width="16" height="16" class="existing"/><text x="75" y="1201" class="small">Existing FastWAM / preprocessing code</text>
+  <rect x="340" y="1188" width="16" height="16" class="proposed"/><text x="365" y="1201" class="small">Proposed SSI branch code</text>
+  <rect x="575" y="1188" width="16" height="16" class="data"/><text x="600" y="1201" class="small">Dataset or cached labels</text>
+  <rect x="780" y="1188" width="16" height="16" class="action"/><text x="805" y="1201" class="small">Action path</text>
+</svg>

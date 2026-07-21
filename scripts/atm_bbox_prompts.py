@@ -70,7 +70,7 @@ def get_task_to_prompt_dict() -> dict[str, dict[str, str]]:
                 "the white moka pot."
             ),
             "KITCHEN_SCENE4_put_the_black_bowl_in_the_bottom_drawer_of_the_cabinet_and_close_it_demo": (
-                "the black drawer. the speckled gray bowl."
+                "the pull-out gray tray. the speckled gray bowl."
             ),
             "KITCHEN_SCENE6_put_the_yellow_and_white_mug_in_the_microwave_and_close_it_demo": (
                 "the yellow cup."

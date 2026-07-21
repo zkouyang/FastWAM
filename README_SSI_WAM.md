@@ -4,13 +4,8 @@ This document tracks the current SSI-WAM implementation plan and the preprocessi
 
 ## Current status
 
-The repository currently includes an offline SSI label preprocessor for LIBERO:
-
-```text
-scripts/preprocess_libero_ssi.py
-```
-
-It also includes an ATM-style bbox-label variant:
+The repository currently includes three independent offline label preprocessors
+for LIBERO. The ATM-style bbox-label preprocessor is:
 
 ```text
 scripts/preprocess_libero_bbox.py
@@ -28,54 +23,58 @@ And a trajectory-only variant:
 scripts/preprocess_libero_motion.py
 ```
 
-The preprocessor generates episode-level SSI supervision labels. It is intentionally a label-stage tool: labels are saved over the full demonstration timeline, and the training dataset should later slice the labels according to the policy horizon, video stride, and SSI loss configuration.
-
-Use `preprocess_libero_ssi.py` when the auxiliary branch should learn role
-layout maps (`source`, `target`, `robot`, `other`). Use
-`preprocess_libero_bbox.py` when the auxiliary branch should keep the original
-ATM bbox labels: raw `[x1, y1, x2, y2]` boxes plus confidence scores. Use
-`preprocess_libero_depth.py` when only monocular depth-grid labels are needed.
-Use `preprocess_libero_motion.py` when only point trajectory labels are needed.
+These tools generate episode-level supervision labels. Labels are saved over
+the full demonstration timeline, and the training dataset should later slice
+them according to the policy horizon and video stride. Use
+`preprocess_libero_bbox.py` for raw ATM-style boxes and confidence scores,
+`preprocess_libero_depth.py` for monocular depth maps, and
+`preprocess_libero_motion.py` for point trajectories.
 
 ## Depth-only label variant
 
 `scripts/preprocess_libero_depth.py` keeps the FastWAM/LIBERO episode loader,
 manifest writing, and depth visualization utilities, but is otherwise
-depth-only. It does not compute role-layout labels, bbox labels, or trajectory
-labels.
+depth-only. It does not compute bbox or trajectory labels.
 
 The depth variant writes:
 
 ```text
-depth:      [C, T_label, G, G]
-depth_conf: [C, T_label, G, G]
+depth:      [C, T_label, H_label, W_label]
+depth_conf: [C, T_label, H_label, W_label]
 ```
 
-`G` is controlled by `--grid-size`, and `T_label` is controlled by
-`--frame-stride`. The default backend is Depth Anything 3:
+For DA3 and Video Depth Anything, `H_label = W_label = --image-size` (224 by
+default): the normalized full-resolution depth map is saved directly without
+downsampling to an SSI grid. `T_label` is controlled by `--frame-stride`. The
+default backend is Video Depth Anything with the Large relative-depth model:
+
+```bash
+--depth-backend video_depth_anything \
+--video-depth-anything-repo-dir ./third_party/Video-Depth-Anything \
+--video-depth-anything-checkpoint ./third_party/Video-Depth-Anything/checkpoints/video_depth_anything_vitl.pth \
+--video-depth-anything-encoder vitl \
+--video-depth-anything-input-size 518 \
+--image-size 224
+```
+
+DA3 remains available as an optional per-frame backend:
 
 ```bash
 --depth-backend da3 --da3-model-id depth-anything/DA3MONO-LARGE
 ```
 
-Depth Anything V2 ViT-L is also supported with a local repo and checkpoint:
+VDA reads videos resized to 224x224 by default (`--image-size 224`) and saves
+224x224 depth labels. `--video-depth-anything-input-size` controls the model's
+internal inference size and does not change the saved label resolution.
 
-```bash
---depth-backend da2 --da2-repo-dir ./third_party/Depth_Anything_V2 --da2-checkpoint ./third_party/Depth_Anything_V2/checkpoints/depth_anything_v2_vitl.pth
-```
-
-For temporally consistent video depth labels, use Video Depth Anything:
-
-```bash
---depth-backend video_depth_anything --video-depth-anything-repo-dir ./third_party/Video-Depth-Anything --video-depth-anything-checkpoint ./third_party/Video-Depth-Anything/checkpoints/video_depth_anything_vitl.pth
-```
+Depth-only visualizations contain two columns: the resized RGB input and the
+final depth label saved to the cache.
 
 ## Trajectory-only label variant
 
 `scripts/preprocess_libero_motion.py` keeps the FastWAM/LIBERO episode loader,
 manifest writing, and trajectory visualization utilities, but is otherwise
-motion-only. It does not compute depth labels, role-layout labels, or bbox
-labels.
+motion-only. It does not compute depth or bbox labels.
 
 The motion variant writes:
 
@@ -103,7 +102,12 @@ tracks again. CoTracker2 is also supported:
 
 `scripts/preprocess_libero_bbox.py` keeps the FastWAM/LIBERO episode loader,
 manifest writing, and bbox visualization utilities, but is otherwise bbox-only.
-It does not compute depth labels, role-layout labels, or trajectory labels.
+It does not compute depth or trajectory labels.
+
+By default it selects one demo for every `(suite, task)` pair and saves both
+the Grounded SAM 2 cache and its visualization (`--max-demos-per-task 1` and
+`--vis-num-demos-per-task 1`). Use `--max-demos-per-task 0` to process every
+matching demo.
 
 The bbox teacher is the local torch-2.7-compatible GroundingDINO copy under:
 
@@ -151,8 +155,7 @@ while wrist-view cameras use only `<task_prompt>`. Override this with:
 --agentview-camera-keys observation.images.image
 ```
 
-The bbox variant does not write `layout`, `layout_conf`, or `role_names`.
-Instead it writes ragged episode-level bbox arrays:
+The bbox variant writes ragged episode-level bbox arrays:
 
 ```text
 bbox_xyxy:        [K, 4]
@@ -211,252 +214,39 @@ The script uses only the local GroundingDINO code/config/checkpoint for bbox
 preprocessing. If CUDA is requested but unavailable, or if the extension cannot
 be imported, the script falls back to CPU with an explicit warning.
 
-## Default layout teacher: Grounding DINO-T
-
-`sam3` is still available as an optional layout backend, but the default layout
-teacher is now Grounding DINO-T because the official SAM3 weights are gated and
-may be unavailable.
-
-Default layout backend:
-
-```text
---layout-backend grounding_dino_t
-```
-
-Default public model:
-
-```text
-IDEA-Research/grounding-dino-tiny
-```
-
-Required packages are already expected in the `fastwam` environment:
-
-```bash
-conda run -n fastwam python -m pip install "transformers>=4.49.0" huggingface_hub safetensors
-```
-
-Download the public Grounding DINO-T files once:
-
-```bash
-conda run -n fastwam python -c "from huggingface_hub import hf_hub_download; files=['config.json','preprocessor_config.json','tokenizer_config.json','tokenizer.json','vocab.txt','special_tokens_map.json','model.safetensors']; [hf_hub_download('IDEA-Research/grounding-dino-tiny', f) for f in files]"
-```
-
-The preprocessing script loads this model with local-cache-only mode by default:
-
-```text
---grounding-dino-local-files-only
-```
-
-If the model is not cached and online loading is desired, use:
-
-```text
---no-grounding-dino-local-files-only
-```
-
-Grounding DINO-T produces language-grounded boxes. The preprocessor rasterizes
-accepted boxes into role-wise SSI grids, so the saved `layout` and `layout_conf`
-tensor schema remains identical to the SAM3 path.
-
-## Optional local SAM3 setup
-
-SAM3 is expected to be installed from the local repository path:
-
-```text
-third_party/sam3
-```
-
-The `fastwam` environment should use this local checkout in editable mode:
-
-```bash
-conda run -n fastwam python -m pip install -e third_party/sam3 --no-deps
-```
-
-Verify the active import path:
-
-```bash
-conda run -n fastwam python -c "import sam3, pathlib; print(pathlib.Path(sam3.__file__).resolve())"
-```
-
-The printed path should point to:
-
-```text
-<repo-root>/third_party/sam3/sam3/__init__.py
-```
-
-SAM3 model weights are local-only by default. Place the official image
-checkpoint here:
-
-```text
-third_party/sam3/checkpoints/sam3.pt
-```
-
-After Hugging Face login and access approval for `facebook/sam3`, download the
-checkpoint with:
-
-```bash
-conda run -n fastwam python -c "from huggingface_hub import hf_hub_download; hf_hub_download(repo_id='facebook/sam3', filename='sam3.pt', local_dir='third_party/sam3/checkpoints')"
-```
-
-Then verify:
-
-```bash
-ls -lh third_party/sam3/checkpoints/sam3.pt
-```
-
-Important: `huggingface-cli login` only configures a token. The account must
-also be approved for the gated `facebook/sam3` repository. If the download
-fails with `403 Forbidden` or `not in the authorized list`, visit:
-
-```text
-https://huggingface.co/facebook/sam3
-```
-
-request/accept access, then rerun the download command.
-
-The preprocessing script also accepts:
-
-```bash
-export SAM3_CHECKPOINT_PATH=/path/to/sam3.pt
-```
-
-or:
-
-```bash
---sam3-checkpoint-path /path/to/sam3.pt
-```
-
-Hugging Face download is disabled by default because `facebook/sam3` is gated.
-Only use `--layout-backend sam3 --sam3-load-from-hf` when the environment is
-logged in with an account that has accepted access to the official SAM3 weights.
-
-## SSI label components
-
-The current preprocessor produces three SSI modalities.
-
-### 1. Geometry / depth labels
-
-Depth labels are generated per camera and per selected frame.
-
-Supported backends:
-
-- `da3`: Depth Anything 3 backend.
-- `heuristic`: lightweight smoke-test backend based on grayscale intensity.
-- `none`: writes zero labels.
-
-Saved fields:
-
-```text
-depth:      [C, T_label, G, G]
-depth_conf: [C, T_label, G, G]
-```
-
-Where:
-
-- `C`: number of cameras.
-- `T_label`: number of labeled frames.
-- `G`: SSI grid size, controlled by `--grid-size`.
-
-Depth values are normalized to `[0, 1]` before being downsampled to the SSI grid.
-
-### 2. Layout / mask labels
-
-Layout labels are role-based spatial maps derived from language-grounded boxes
-or masks.
-
-Current roles:
-
-```text
-source
-target
-robot
-other
-```
-
-Supported backends:
-
-- `grounding_dino_t`: default Grounding DINO-T box-grounding backend.
-- `sam3`: optional SAM 3 / SAM 3.1 concept segmentation backend.
-- `heuristic`: lightweight smoke-test backend with synthetic role maps.
-- `none`: writes zero labels.
-
-Saved fields:
-
-```text
-layout:      [C, T_label, R, G, G]
-layout_conf: [C, T_label, R, G, G]
-role_names:  [R]
-```
-
-The script parses the LIBERO task instruction into role prompts. With the
-default Grounding DINO-T backend, it runs text-prompted box grounding for each
-role, rasterizes boxes into dense confidence maps, and downsamples them into
-role grids. With `sam3`, it instead runs text-prompted segmentation masks before
-the same grid conversion.
-
-### 3. Trajectory labels
-
-Trajectory labels follow the ATM-style CoTracker preprocessing pattern.
-
-The current CoTracker path:
-
-1. Samples random query points.
-2. Samples an ATM-style double grid.
-3. Assigns each query a random anchor time.
-4. Runs CoTracker with backward tracking when supported.
-5. Filters static random points using trajectory variance.
-6. Repeats dynamic points with spatial noise.
-7. Re-tracks and concatenates grid tracks with dynamic random tracks.
-
-Supported backends:
-
-- `cotracker3`: CoTracker3 backend.
-- `opencv`: lightweight LK optical-flow fallback for smoke tests.
-- `none`: writes zero labels.
-
-Saved fields:
-
-```text
-motion_points:       [C, T_episode, N, 2]
-motion_visibility:   [C, T_episode, N]
-motion_point_source: [C, N]
-```
-
-Coordinates are normalized `xy` values in `[0, 1]`.
-
-With default CoTracker settings:
-
-```text
-N = motion_num_random_points + 2 * motion_grid_size^2
-  = 1000 + 2 * 7^2
-  = 1098
-```
-
 ## Output format
 
-### Role-layout SSI cache
+### Depth cache
 
-For each processed episode, the script writes:
-
-```text
-<output-root>/<suite>/episode_XXXXXX.ssi.npz
-```
-
-Default output root:
+The depth preprocessor writes:
 
 ```text
-./data/libero_mujoco3.3.2_ssi_cache
+<output-root>/<suite>/episode_XXXXXX.depth.npz
 ```
 
-Each `.npz` file contains:
+Each file contains:
 
 ```text
 frame_indices
 camera_keys
-role_names
 depth
 depth_conf
-layout
-layout_conf
+meta_json
+```
+
+### Motion cache
+
+The motion preprocessor writes:
+
+```text
+<output-root>/<suite>/episode_XXXXXX.motion.npz
+```
+
+Each file contains:
+
+```text
+frame_indices
+camera_keys
 motion_points
 motion_visibility
 motion_point_source
@@ -482,24 +272,22 @@ Each `.bbox.npz` file contains:
 ```text
 frame_indices
 camera_keys
-depth
-depth_conf
 bbox_xyxy
 bbox_confidences
 bbox_offsets
 bbox_counts
 bbox_labels_json
-motion_points
-motion_visibility
-motion_point_source
 meta_json
 ```
+
+When `--bbox-backend grounded_sam2` is selected (the default), the file additionally
+contains `bbox_masks`.
 
 `bbox_labels_json` stores the raw text labels returned by the ATM/Grounding
 DINO path for each camera/frame. `meta_json` records the resolved ATM prompt,
 the prompt source, camera order, image size, and bbox coordinate convention.
 
-The global manifest is written to:
+Each preprocessor writes its global manifest to:
 
 ```text
 <output-root>/manifest.jsonl
@@ -507,14 +295,15 @@ The global manifest is written to:
 
 ## Visualization output
 
-The preprocessor can save visualizations for the first `N` demos of each task. This is enabled by default with `N=1`.
+Each preprocessor can save visualizations for the first `N` demos of each task.
+This is enabled by default with `N=1`.
 
-Saved visualization types:
+The saved video depends on the selected script:
 
 ```text
-depth_map.mp4
-bbox_map.mp4
-trajectory.mp4
+preprocess_libero_depth.py  -> depth_map.mp4
+preprocess_libero_bbox.py   -> bbox_map.mp4
+preprocess_libero_motion.py -> trajectory.mp4
 ```
 
 Default visualization directory:
@@ -532,13 +321,9 @@ Example structure:
         └── episode_000000/
             ├── task.txt
             ├── camera_00_observation.images.image/
-            │   ├── depth_map.mp4
-            │   ├── bbox_map.mp4
-            │   └── trajectory.mp4
+            │   └── <modality>.mp4
             └── camera_01_observation.images.wrist_image/
-                ├── depth_map.mp4
-                ├── bbox_map.mp4
-                └── trajectory.mp4
+                └── <modality>.mp4
 ```
 
 Visualization controls:
@@ -548,9 +333,9 @@ Visualization controls:
 --vis-output-dir <path>
 --vis-fps 10
 --vis-max-frames 48
---vis-max-tracks 128
---vis-bbox-threshold 0.20
 ```
+
+The motion-only script also accepts `--vis-max-tracks 128`.
 
 Notes:
 
@@ -558,79 +343,28 @@ Notes:
 - `--vis-max-frames 48` uniformly samples at most 48 labeled frames for visualization only.
 - `--vis-max-frames 0` renders the complete demo.
 - Visualization does not change the saved training labels.
-- `--vis-bbox-threshold` only applies to role-layout SSI visualizations; the bbox variant draws the raw boxes directly.
 
 ## Example commands
 
-### Smoke test with SSI teacher models
-
-Use this to verify the real DA3 / Grounding DINO-T / CoTracker3 preprocessing
-path on one LIBERO episode.
-
-```bash
-python scripts/preprocess_libero_ssi.py \
-  --data-root ./data/libero_mujoco3.3.2 \
-  --output-root ./data/libero_mujoco3.3.2_ssi_cache_tmp \
-  --suites libero_spatial_no_noops_lerobot \
-  --max-episodes 1 \
-  --depth-backend da3 \
-  --layout-backend grounding_dino_t \
-  --motion-backend cotracker3 \
-  --device cuda
-```
-
-For a quick layout-only validation on CPU, label only one frame and disable
-depth/motion:
-
-```bash
-python scripts/preprocess_libero_ssi.py \
-  --data-root ./data/libero_mujoco3.3.2 \
-  --output-root /tmp/fastwam_ssi_grounding_dino_t_smoke \
-  --suites libero_spatial_no_noops_lerobot \
-  --max-episodes 1 \
-  --depth-backend none \
-  --layout-backend grounding_dino_t \
-  --motion-backend none \
-  --device cpu \
-  --frame-stride 999 \
-  --vis-num-demos-per-task 1 \
-  --overwrite
-```
-
-### Full preprocessing with SSI teacher models
-
-Uses Grounding DINO-T by default for layout labels.
-
-```bash
-python scripts/preprocess_libero_ssi.py \
-  --data-root ./data/libero_mujoco3.3.2 \
-  --output-root ./data/libero_mujoco3.3.2_ssi_cache \
-  --depth-backend da3 \
-  --layout-backend grounding_dino_t \
-  --motion-backend cotracker3 \
-  --device cuda
-```
-
 ### Smoke test with depth labels
 
-Use this to verify the depth-only DA3 path on one LIBERO episode.
+Use this to verify the default depth-only VDA path on one LIBERO episode. It
+uses the default 224x224 video input and saves 224x224 labels.
 
 ```bash
 python scripts/preprocess_libero_depth.py \
   --data-root ./data/libero_mujoco3.3.2 \
-  --output-root ./data/libero_mujoco3.3.2_depth_smoke \
+  --output-root ./data/libero_mujoco3.3.2_depth_vda_smoke \
   --suites libero_goal_no_noops_lerobot \
   --max-episodes 1 \
-  --depth-backend da3 \
   --device cuda \
   --frame-stride 1 \
   --vis-num-demos-per-task 1 \
   --overwrite
 ```
 
-Video Depth Anything is also supported for temporally consistent depth labels.
-The default checkpoint is the official Large relative-depth model:
-`third_party/Video-Depth-Anything/checkpoints/video_depth_anything_vitl.pth`.
+For a lightweight CPU smoke test, reduce both the saved video resolution and
+VDA's internal inference size explicitly:
 
 ```bash
 python scripts/preprocess_libero_depth.py \
@@ -645,19 +379,19 @@ python scripts/preprocess_libero_depth.py \
   --video-depth-anything-encoder vitl \
   --video-depth-anything-input-size 70 \
   --frame-stride 20 \
-  --vis-num-demos-per-task 0 \
+  --vis-num-demos-per-task 1 \
   --overwrite
 ```
 
 ### Full preprocessing with depth labels
 
-This command writes `.depth.npz` episode caches with DA3 depth labels only.
+This command uses the default VDA backend and writes full-resolution 224x224
+depth labels to the `.depth.npz` episode caches.
 
 ```bash
 python scripts/preprocess_libero_depth.py \
   --data-root ./data/libero_mujoco3.3.2 \
   --output-root ./data/libero_mujoco3.3.2_depth_cache \
-  --depth-backend da3 \
   --device cuda
 ```
 
@@ -694,8 +428,7 @@ python scripts/preprocess_libero_motion.py \
 ### Smoke test with ATM bbox labels
 
 Use this to verify the local ATM-style bbox path on one LIBERO episode. The
-bbox script is bbox-only, so no depth, role-layout, or trajectory flags are
-needed.
+bbox script is bbox-only, so no depth or trajectory flags are needed.
 
 ```bash
 python scripts/preprocess_libero_bbox.py \
@@ -741,51 +474,9 @@ The hdf5 export path is:
 <frame-hdf5-root>/<suite>/<atm-task-key>/bbox/episode_XXXXXX/<camera>_<frame>.hdf5
 ```
 
-### Full preprocessing with complete visualization videos
-
-```bash
-python scripts/preprocess_libero_ssi.py \
-  --data-root ./data/libero_mujoco3.3.2 \
-  --output-root ./data/libero_mujoco3.3.2_ssi_cache \
-  --depth-backend da3 \
-  --layout-backend grounding_dino_t \
-  --motion-backend cotracker3 \
-  --device cuda \
-  --vis-num-demos-per-task 1 \
-  --vis-max-frames 0
-```
-
-### Disable visualization
-
-```bash
-python scripts/preprocess_libero_ssi.py \
-  --data-root ./data/libero_mujoco3.3.2 \
-  --output-root ./data/libero_mujoco3.3.2_ssi_cache \
-  --depth-backend da3 \
-  --layout-backend grounding_dino_t \
-  --motion-backend cotracker3 \
-  --device cuda \
-  --vis-num-demos-per-task 0
-```
-
-### Optional SAM3 layout backend
-
-SAM3 remains available when local or authorized weights are available:
-
-```bash
-python scripts/preprocess_libero_ssi.py \
-  --data-root ./data/libero_mujoco3.3.2 \
-  --output-root ./data/libero_mujoco3.3.2_ssi_cache_sam3 \
-  --depth-backend da3 \
-  --layout-backend sam3 \
-  --sam3-checkpoint-path /path/to/sam3.pt \
-  --motion-backend cotracker3 \
-  --device cuda
-```
-
 ## Training-time slicing
 
-The cache is episode-level. Training code should dynamically slice it.
+Each cache is episode-level. Training code should dynamically slice it.
 
 For FastWAM LIBERO defaults:
 
@@ -801,7 +492,6 @@ Given a sampled window start index:
 video_indices = start + np.arange(0, 33, 4)
 
 depth_label = depth[:, video_indices]
-layout_label = layout[:, video_indices]
 
 traj = motion_points[:, video_indices]
 traj_delta = traj - traj[:, :1]
@@ -852,36 +542,31 @@ or use a system FFmpeg build with AV1 support, such as `libdav1d` or `libaom`.
 
 ### Preprocessing
 
-- [ ] Verify the official SAM 3.1 API path and update the `sam3` backend if the installed package exposes a different interface.
 - [ ] Verify the official Depth Anything 3 API path and update the `da3` backend if needed.
 - [ ] Add deterministic seeding for random trajectory query sampling.
-- [ ] Add optional role-prompt metadata files for more reliable LIBERO object/receptacle parsing.
-- [ ] Add quality metrics for label generation, such as empty-mask ratio, depth confidence statistics, and trajectory visibility ratio.
+- [ ] Add quality metrics for label generation, such as empty-box ratio, depth confidence statistics, and trajectory visibility ratio.
 - [ ] Add a resumable manifest mode that skips completed episodes while still allowing visualization regeneration.
 
 ### Dataset integration
 
-- [ ] Add an SSI-aware dataset wrapper that loads `.ssi.npz` files.
+- [ ] Add dataset wrappers that load `.depth.npz` and `.motion.npz` files.
 - [ ] Add a bbox-aware dataset wrapper that loads `.bbox.npz` files and pads ragged bbox labels.
-- [ ] Implement training-time slicing from episode-level SSI labels to window-level supervision.
-- [ ] Align SSI frame indices with FastWAM `video_sample_indices`.
+- [ ] Implement training-time slicing from episode-level labels to window-level supervision.
+- [ ] Align label frame indices with FastWAM `video_sample_indices`.
 - [ ] Add validation checks for camera order, episode length, and frame index consistency.
 
 ### Model integration
 
 - [ ] Add an SSI branch / SSI expert module.
-- [ ] Add depth, layout, and trajectory prediction heads.
+- [ ] Add depth, bbox, and trajectory prediction heads.
 - [ ] Add SSI auxiliary losses.
 - [ ] Ensure the action branch does not read SSI tokens during deployment.
 - [ ] Keep deployment path identical to FastWAM action inference except for checkpoint compatibility.
 
 ### Experiments
 
-- [ ] Run smoke tests with heuristic labels.
-- [ ] Run small LIBERO subset preprocessing with real DA3 / Grounding DINO-T / CoTracker3 teachers.
+- [ ] Run small LIBERO subset preprocessing with VDA and CoTracker3 teachers.
 - [ ] Run small LIBERO subset preprocessing with ATM bbox labels.
-- [ ] Optionally compare Grounding DINO-T box grids with SAM3 masks if SAM3 access becomes available.
-- [ ] Compare role-layout SSI labels vs raw ATM bbox labels.
 - [ ] Compare FastWAM baseline vs SSI auxiliary branch.
-- [ ] Add ablations for depth-only, layout-only, trajectory-only, and full SSI supervision.
+- [ ] Add ablations for depth-only, bbox-only, trajectory-only, and combined supervision.
 - [ ] Add a detached-video-feature ablation to verify whether SSI helps through representation shaping.
