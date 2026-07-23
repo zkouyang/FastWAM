@@ -69,6 +69,10 @@ auxiliary:
   enabled: false
   compute_auxiliary: true
   common:
+    # The horizontal LIBERO canvas is [agentview, wrist]. Auxiliary queries
+    # condition on agentview Video K/V only; Action keeps both cameras.
+    conditioning_camera_indices: [0]
+    conditioning_num_cameras: 2
     hidden_dim: 256
     ffn_dim: 1024
     max_frames: 64

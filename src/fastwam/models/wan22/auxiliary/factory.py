@@ -29,6 +29,9 @@ def build_auxiliary_branches(
     if not bool(config.get("enabled", False)):
         return {}, config
     common_cfg = dict(config.get("common", {}))
+    # These keys configure MoT visibility, not branch construction.
+    common_cfg.pop("conditioning_camera_indices", None)
+    common_cfg.pop("conditioning_num_cameras", None)
     common_defaults = {
         # A bottleneck hidden width keeps four independent 30-layer experts
         # tractable; q/k/v still use Video-DiT's exact head layout for MoT.

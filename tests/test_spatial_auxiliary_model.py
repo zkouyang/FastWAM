@@ -10,11 +10,13 @@ import torch.nn as nn
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel
 
+from fastwam.losses.spatial_auxiliary import mask_hungarian_loss, prepare_trajectory_targets
 from fastwam.models.wan22.action_dit import ActionDiT
 from fastwam.models.wan22.auxiliary.factory import build_auxiliary_branches
 from fastwam.models.wan22.fastwam import FastWAM
 from fastwam.models.wan22.mot import MoT
 from fastwam.models.wan22.wan_video_dit import WanVideoDiT
+from fastwam.trainer import Wan22Trainer
 
 
 class TinyVAE(nn.Module):
@@ -180,6 +182,151 @@ def test_each_branch_forward_backward_and_shared_video_gradient(name):
     assert any(p.grad is not None and torch.count_nonzero(p.grad) for p in model.video_expert.parameters())
 
 
+def test_trainer_dit_only_mode_computes_auxiliary_losses():
+    model = build_tiny_model(["depth", "bbox", "mask", "trajectory"])
+    Wan22Trainer._apply_dit_only_train_mode(model)
+    assert not model.training
+    assert model.dit.training
+
+    model.loss_lambda_video = 0.0
+    model.loss_lambda_action = 0.0
+    loss, metrics = model.training_loss(make_sample())
+    assert loss > 0
+    assert all(metrics[f"loss_{name}"] > 0 for name in model.auxiliary_branch_names)
+    loss.backward()
+    assert any(
+        parameter.grad is not None and torch.count_nonzero(parameter.grad)
+        for parameter in model.video_expert.parameters()
+    )
+
+
+def test_auxiliary_attention_reads_agentview_video_tokens_only():
+    model = build_tiny_model(["depth"])
+    model.auxiliary_config["common"]["conditioning_camera_indices"] = [0]
+    model.auxiliary_config["common"]["conditioning_num_cameras"] = 2
+    mask = model._build_training_attention_mask(
+        seq_lens={"video": 8, "action": 2, "depth": 2},
+        video_tokens_per_frame=8,
+        video_grid_size=(1, 2, 4),
+        device=torch.device("cpu"),
+    )
+    action_to_video = mask[8:10, :8]
+    depth_to_video = mask[10:12, :8]
+    assert bool(action_to_video.all())
+    torch.testing.assert_close(
+        depth_to_video,
+        torch.tensor(
+            [
+                [True, True, False, False, True, True, False, False],
+                [True, True, False, False, True, True, False, False],
+            ]
+        ),
+    )
+
+
+def test_auxiliary_only_step_changes_action_through_video_expert():
+    model = build_tiny_model(["depth"])
+    image = torch.randn(3, 16, 16)
+    context = torch.randn(1, 3, 12)
+    context_mask = torch.ones(1, 3, dtype=torch.bool)
+    inference_kwargs = {
+        "prompt": None,
+        "input_image": image,
+        "action_horizon": 4,
+        "context": context,
+        "context_mask": context_mask,
+        "num_inference_steps": 1,
+        "seed": 7,
+    }
+    before_action = model.infer_action(**inference_kwargs)["action"]
+    before_action_parameters = {
+        name: parameter.detach().clone() for name, parameter in model.action_expert.named_parameters()
+    }
+    before_video_parameters = {
+        name: parameter.detach().clone() for name, parameter in model.video_expert.named_parameters()
+    }
+
+    Wan22Trainer._apply_dit_only_train_mode(model)
+    model.loss_lambda_video = 0.0
+    model.loss_lambda_action = 0.0
+    optimizer = torch.optim.SGD(model.dit.parameters(), lr=0.05)
+    loss, _metrics = model.training_loss(make_sample())
+    loss.backward()
+    optimizer.step()
+
+    assert all(
+        torch.equal(parameter, before_action_parameters[name])
+        for name, parameter in model.action_expert.named_parameters()
+    )
+    assert any(
+        not torch.equal(parameter, before_video_parameters[name])
+        for name, parameter in model.video_expert.named_parameters()
+    )
+    after_action = model.infer_action(**inference_kwargs)["action"]
+    assert not torch.equal(before_action, after_action)
+
+
+def test_auxiliary_configuration_validation():
+    model = build_tiny_model(["depth"])
+    enabled_loader = SimpleNamespace(
+        enabled=True,
+        load_depth=True,
+        load_bbox=False,
+        load_mask=False,
+        load_trajectory=False,
+    )
+    Wan22Trainer._validate_auxiliary_configuration(
+        model, SimpleNamespace(auxiliary_label_loader=enabled_loader)
+    )
+    with pytest.raises(ValueError, match="labels are disabled"):
+        Wan22Trainer._validate_auxiliary_configuration(
+            model, SimpleNamespace(auxiliary_label_loader=SimpleNamespace(enabled=False))
+        )
+    with pytest.raises(ValueError, match="no auxiliary branches"):
+        Wan22Trainer._validate_auxiliary_configuration(
+            build_tiny_model([]), SimpleNamespace(auxiliary_label_loader=enabled_loader)
+        )
+    master_only = build_tiny_model([])
+    master_only.auxiliary_config["enabled"] = True
+    with pytest.raises(ValueError, match="no auxiliary branch is enabled"):
+        Wan22Trainer._validate_auxiliary_configuration(
+            master_only,
+            SimpleNamespace(auxiliary_label_loader=SimpleNamespace(enabled=False)),
+        )
+
+
+def test_unmatched_mask_queries_receive_background_gradient():
+    prediction = torch.full((1, 1, 2, 4, 4), -5.0)
+    prediction[0, 0, 0, 1:3, 1:3] = 5.0
+    prediction[0, 0, 1] = 5.0
+    prediction.requires_grad_()
+    target = torch.zeros(1, 4, 4)
+    target[0, 1:3, 1:3] = 1.0
+
+    mask_hungarian_loss(prediction, [[target]]).backward()
+    assert torch.count_nonzero(prediction.grad[0, 0, 1]) > 0
+
+
+def test_trajectory_selection_uses_camera_local_queries():
+    global_queries = torch.tensor([[[0.25, 0.5], [0.49, 0.5], [0.75, 0.5], [0.51, 0.5]]])
+    local_queries = torch.tensor([[[0.5, 0.5], [0.98, 0.5], [0.5, 0.5], [0.02, 0.5]]])
+    trajectories = global_queries.unsqueeze(2).expand(-1, -1, 2, -1).clone()
+    targets = prepare_trajectory_targets(
+        {
+            "trajectories": trajectories,
+            "traj_visibility": torch.ones(1, 4, 2),
+            "traj_query_points": global_queries,
+            "traj_query_points_local": local_queries,
+            "traj_camera_indices": torch.tensor([[0, 0, 1, 1]]),
+        },
+        num_points=2,
+        device=torch.device("cpu"),
+    )
+    torch.testing.assert_close(
+        targets["query_points"][0], torch.tensor([[0.25, 0.5], [0.75, 0.5]])
+    )
+
+
 def test_full_loss_baseline_switch_amp_and_inference_skip(monkeypatch):
     names = ["depth", "bbox", "mask", "trajectory"]
     model = build_tiny_model(names).train()
@@ -259,11 +406,14 @@ def test_single_process_ddp_full_backward(tmp_path: Path, monkeypatch):
         world_size=1,
     )
     try:
-        model = DistributedDataParallel(
-            build_tiny_model(["depth", "bbox", "mask", "trajectory"]).train()
-        )
-        loss, _metrics = model(make_sample())
-        loss.backward()
-        assert torch.isfinite(loss)
+        base_model = build_tiny_model(["depth", "bbox", "mask", "trajectory"])
+        Wan22Trainer._apply_dit_only_train_mode(base_model)
+        model = DistributedDataParallel(base_model)
+        for _ in range(2):
+            loss, metrics = model(make_sample())
+            assert all(metrics[f"loss_{name}"] > 0 for name in base_model.auxiliary_branch_names)
+            loss.backward()
+            assert torch.isfinite(loss)
+            model.zero_grad(set_to_none=True)
     finally:
         dist.destroy_process_group()

@@ -185,7 +185,11 @@ def mask_hungarian_loss(
             pred_idx, target_idx = _linear_sum_assignment(bce_cost + float(beta_dice) * dice_cost)
             matched_logits = pred_masks[b, t, pred_idx]
             matched_targets = target[target_idx]
-            bce = F.binary_cross_entropy_with_logits(matched_logits, matched_targets)
+            # Matched queries learn their instance masks; unmatched queries are
+            # explicit background instead of receiving no gradient.
+            all_targets = torch.zeros_like(pred_masks[b, t])
+            all_targets[pred_idx] = matched_targets
+            bce = F.binary_cross_entropy_with_logits(pred_masks[b, t], all_targets)
             matched_prob = matched_logits.sigmoid().flatten(1)
             matched_flat = matched_targets.flatten(1)
             dice = 1.0 - (2 * (matched_prob * matched_flat).sum(1) + 1) / (
@@ -217,6 +221,9 @@ def prepare_trajectory_targets(
     trajectories = sample["trajectories"].to(device=device, dtype=torch.float32)
     visibility = sample["traj_visibility"].to(device=device, dtype=torch.float32)
     queries = sample["traj_query_points"].to(device=device, dtype=torch.float32)
+    selection_queries = sample.get("traj_query_points_local", sample["traj_query_points"]).to(
+        device=device, dtype=torch.float32
+    )
     pad = sample.get("traj_point_is_pad")
     cameras = sample.get("traj_camera_indices")
     if pad is None:
@@ -243,7 +250,7 @@ def prepare_trajectory_targets(
             allocation = min(allocation, len(candidate))
             if allocation == 0:
                 continue
-            candidate_points = queries[b, candidate]
+            candidate_points = selection_queries[b, candidate]
             grid = _double_grid(allocation, device=device)
             distances = torch.cdist(grid, candidate_points)
             chosen: list[int] = []

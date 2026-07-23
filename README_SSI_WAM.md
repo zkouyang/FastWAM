@@ -574,11 +574,14 @@ The task outputs and losses are:
   double-grid point selection, `[B,N,T,2]` coordinates, `[B,N,T]` visibility,
   and masked coordinate/visibility losses.
 
-During mixed MoT training, Action and each auxiliary expert can read only
-their own tokens and the clean first-frame Video K/V. Auxiliary experts cannot
-read one another, and Action cannot read auxiliary tokens or head outputs.
-This gives every auxiliary loss a gradient path into the Video world
-representation used by Action inference without changing the action input.
+During mixed MoT training, Action reads its own tokens and both cameras'
+clean first-frame Video K/V. Each auxiliary expert reads its own tokens and
+only the configured agentview region of first-frame Video K/V. Auxiliary
+targets likewise contain agentview only while remaining aligned to the
+two-camera canvas. Auxiliary experts cannot read one another, and Action
+cannot read auxiliary tokens or head outputs. This gives every auxiliary loss
+a gradient path into the Video world representation used by Action inference
+without changing the action input.
 
 `configs/model/fastwam.yaml` contains independent `enabled` flags and branch
 settings. The repository default remains the exact baseline:

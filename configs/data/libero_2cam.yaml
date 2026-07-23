@@ -38,6 +38,9 @@ train:
   # Fast-WAM dataset output and inference behavior exactly.
   auxiliary_labels:
     enabled: false
+    # Supervise agentview only while keeping targets in the two-camera canvas.
+    target_camera_keys:
+      - observation.images.image
     load_depth: true
     load_bbox: true
     load_mask: true

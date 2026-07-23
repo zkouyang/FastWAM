@@ -439,14 +439,16 @@ class FastWAM(torch.nn.Module):
         *,
         seq_lens: dict[str, int],
         video_tokens_per_frame: int,
+        video_grid_size: Optional[tuple[int, int, int]] = None,
         device: torch.device,
     ) -> torch.Tensor:
         """Structured MoT mask for active training experts.
 
-        Video keeps its original attention policy. Action and every auxiliary
-        expert attend to their own tokens plus the clean first-frame Video K/V.
-        They never attend to one another, so explicit auxiliary representations
-        and predictions cannot leak into Action.
+        Video keeps its original attention policy. Action attends to its own
+        tokens plus all clean first-frame Video K/V. Auxiliary experts attend
+        to their own tokens plus configured first-frame camera regions. They
+        never attend to one another, so explicit auxiliary representations and
+        predictions cannot leak into Action.
         """
 
         active = [name for name in self.mot.expert_order if name in seq_lens]
@@ -463,12 +465,43 @@ class FastWAM(torch.nn.Module):
             device=device,
         )
         first_frame_end = video_start + min(video_tokens_per_frame, seq_lens["video"])
+        auxiliary_video_keys: slice | torch.Tensor = slice(video_start, first_frame_end)
+        common_cfg = dict(self.auxiliary_config.get("common", {}))
+        camera_indices = common_cfg.get("conditioning_camera_indices")
+        if camera_indices is not None:
+            if video_grid_size is None:
+                raise ValueError("video_grid_size is required for camera-specific auxiliary attention")
+            _frames, grid_h, grid_w = map(int, video_grid_size)
+            num_cameras = int(common_cfg.get("conditioning_num_cameras", 1))
+            if num_cameras <= 0 or grid_w % num_cameras != 0:
+                raise ValueError(
+                    f"Video token grid width {grid_w} is not divisible by {num_cameras} cameras"
+                )
+            if grid_h * grid_w != video_tokens_per_frame:
+                raise ValueError(
+                    "Video grid/token mismatch for camera-specific auxiliary attention: "
+                    f"{grid_h}*{grid_w} != {video_tokens_per_frame}"
+                )
+            camera_width = grid_w // num_cameras
+            selected = torch.zeros((grid_h, grid_w), dtype=torch.bool, device=device)
+            for camera_index in camera_indices:
+                camera_index = int(camera_index)
+                if camera_index < 0 or camera_index >= num_cameras:
+                    raise ValueError(
+                        f"Auxiliary conditioning camera index {camera_index} is outside "
+                        f"[0, {num_cameras})"
+                    )
+                selected[:, camera_index * camera_width : (camera_index + 1) * camera_width] = True
+            auxiliary_video_keys = torch.where(selected.flatten())[0] + video_start
         for name in active:
             if name == "video":
                 continue
             start, end = offsets[name]
             mask[start:end, start:end] = True
-            mask[start:end, video_start:first_frame_end] = True
+            if name == "action":
+                mask[start:end, video_start:first_frame_end] = True
+            else:
+                mask[start:end, auxiliary_video_keys] = True
         return mask
 
     def get_auxiliary_branch(self, name: str) -> nn.Module:
@@ -566,7 +599,9 @@ class FastWAM(torch.nn.Module):
         action_tokens = action_pre["tokens"]
 
         use_auxiliary = self.compute_auxiliary if compute_auxiliary is None else bool(compute_auxiliary)
-        use_auxiliary = use_auxiliary and self.training and bool(self.auxiliary_branch_names)
+        # The trainer keeps frozen VAE/text modules in eval mode and only puts
+        # `model.dit` (the MoT) in train mode.
+        use_auxiliary = use_auxiliary and self.mot.training and bool(self.auxiliary_branch_names)
         pre_states: dict[str, dict[str, Any]] = {"video": video_pre, "action": action_pre}
         trajectory_targets = None
         if use_auxiliary:
@@ -621,6 +656,7 @@ class FastWAM(torch.nn.Module):
         attention_mask = self._build_training_attention_mask(
             seq_lens=seq_lens,
             video_tokens_per_frame=int(video_pre["meta"]["tokens_per_frame"]),
+            video_grid_size=tuple(video_pre["meta"]["grid_size"]),
             device=video_tokens.device,
         )
         tokens_out = self.mot(

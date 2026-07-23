@@ -55,6 +55,7 @@ class Wan22Trainer:
                 "Expected one of: ['no', 'fp16', 'bf16']."
             )
         self.wandb_enabled = bool(cfg.wandb.enabled)
+        self._validate_auxiliary_configuration(self.model, self.train_dataset)
 
         self.accelerator = Accelerator(
             gradient_accumulation_steps=self.gradient_accumulation_steps,
@@ -181,6 +182,40 @@ class Wan22Trainer:
             worker_init_fn=worker_init_fn,
             collate_fn=getattr(dataset, "collate_fn", None),
         )
+
+    @staticmethod
+    def _validate_auxiliary_configuration(model, dataset):
+        branch_names = set(getattr(model, "auxiliary_branch_names", ()))
+        model_labels_enabled = bool(
+            getattr(model, "auxiliary_config", {}).get("enabled", False)
+        )
+        loader = getattr(dataset, "auxiliary_label_loader", None)
+        labels_enabled = bool(getattr(loader, "enabled", False))
+        if model_labels_enabled and not branch_names:
+            raise ValueError(
+                "model.auxiliary.enabled=true but no auxiliary branch is enabled."
+            )
+        if not branch_names and not labels_enabled:
+            return
+        if branch_names and not labels_enabled:
+            raise ValueError(
+                "Auxiliary model branches are enabled but train_dataset auxiliary labels are disabled."
+            )
+        if labels_enabled and not branch_names:
+            raise ValueError(
+                "Train dataset auxiliary labels are enabled but the model has no auxiliary branches."
+            )
+        load_flag = {
+            "depth": "load_depth",
+            "bbox": "load_bbox",
+            "mask": "load_mask",
+            "trajectory": "load_trajectory",
+        }
+        missing = sorted(
+            name for name in branch_names if not bool(getattr(loader, load_flag[name], False))
+        )
+        if missing:
+            raise ValueError(f"Auxiliary model branches have no matching dataset labels: {missing}")
 
     def _assert_dataset_length_consistent(self, dataset, dataset_name: str):
         if not hasattr(dataset, "__len__"):

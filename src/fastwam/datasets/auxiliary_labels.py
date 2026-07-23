@@ -31,6 +31,7 @@ _TRAJECTORY_KEYS = {
     "trajectories",
     "traj_visibility",
     "traj_query_points",
+    "traj_query_points_local",
     "traj_point_source",
     "traj_camera_indices",
 }
@@ -127,7 +128,11 @@ class LiberoAuxiliaryLabelLoader:
         self.load_trajectory = bool(cfg.get("load_trajectory", True))
         self.dataset_dirs = [Path(path) for path in dataset_dirs]
         self.suite_names = [path.name for path in self.dataset_dirs]
-        self.camera_keys = list(camera_keys)
+        self.canvas_camera_keys = list(camera_keys)
+        target_camera_keys = cfg.get("target_camera_keys", self.canvas_camera_keys)
+        if isinstance(target_camera_keys, str):
+            target_camera_keys = [target_camera_keys]
+        self.camera_keys = list(target_camera_keys)
         self.target_hw = (int(video_size[0]), int(video_size[1]))
         self.concat_multi_camera = concat_multi_camera
 
@@ -135,7 +140,15 @@ class LiberoAuxiliaryLabelLoader:
             return
         if not any((self.load_depth, self.load_bbox, self.load_mask, self.load_trajectory)):
             raise ValueError("auxiliary_labels.enabled=true but every modality is disabled")
-        if len(self.camera_keys) > 1 and self.concat_multi_camera not in {"horizontal", "vertical"}:
+        if not self.camera_keys:
+            raise ValueError("auxiliary_labels.target_camera_keys cannot be empty")
+        unknown_cameras = [key for key in self.camera_keys if key not in self.canvas_camera_keys]
+        if unknown_cameras:
+            raise ValueError(
+                "auxiliary_labels.target_camera_keys must be a subset of the RGB cameras; "
+                f"unknown cameras: {unknown_cameras}"
+            )
+        if len(self.canvas_camera_keys) > 1 and self.concat_multi_camera not in {"horizontal", "vertical"}:
             raise ValueError(
                 "LIBERO auxiliary labels currently support horizontal or vertical multi-camera "
                 f"composition, got {self.concat_multi_camera!r}"
@@ -216,7 +229,7 @@ class LiberoAuxiliaryLabelLoader:
         return positions.astype(np.int64)
 
     def _layout(self, height: int, width: int) -> tuple[int, int, list[tuple[int, int]]]:
-        num_cameras = len(self.camera_keys)
+        num_cameras = len(self.canvas_camera_keys)
         if num_cameras == 1:
             return height, width, [(0, 0)]
         if self.concat_multi_camera == "horizontal":
@@ -261,15 +274,28 @@ class LiberoAuxiliaryLabelLoader:
         conf_array = arrays.get("depth_conf", np.ones_like(depth_array))
         depth = torch.from_numpy(depth_array[np.ix_(cameras, frames)].astype(np.float32))
         confidence = torch.from_numpy(conf_array[np.ix_(cameras, frames)].astype(np.float32))
-        # [C,T,H,W] -> RGB camera composition -> [T,1,H_out,W_out]
-        cat_dim = -1 if self.concat_multi_camera == "horizontal" else -2
-        depth = torch.cat([depth[i] for i in range(len(cameras))], dim=cat_dim).unsqueeze(1)
-        confidence = torch.cat([confidence[i] for i in range(len(cameras))], dim=cat_dim).unsqueeze(1)
+        # Compose selected supervision cameras into the unchanged RGB canvas.
+        # Unselected camera regions have zero confidence and do not affect loss.
+        camera_h, camera_w = map(int, depth.shape[-2:])
+        canvas_h, canvas_w, origins = self._layout(camera_h, camera_w)
+        depth_canvas = torch.zeros((len(frames), canvas_h, canvas_w), dtype=torch.float32)
+        confidence_canvas = torch.zeros_like(depth_canvas)
+        for selected_index, camera_key in enumerate(self.camera_keys):
+            output_camera = self.canvas_camera_keys.index(camera_key)
+            y_offset, x_offset = origins[output_camera]
+            depth_canvas[:, y_offset : y_offset + camera_h, x_offset : x_offset + camera_w] = depth[
+                selected_index
+            ]
+            confidence_canvas[
+                :, y_offset : y_offset + camera_h, x_offset : x_offset + camera_w
+            ] = confidence[selected_index]
         return {
             # Preserve the cache's depth convention (relative, inverse, or
             # metric).  Only confidence is intrinsically bounded to [0, 1].
-            "depth": self._resize_crop(depth, mode="bilinear"),
-            "depth_confidence": self._resize_crop(confidence, mode="bilinear").clamp_(0.0, 1.0),
+            "depth": self._resize_crop(depth_canvas.unsqueeze(1), mode="bilinear"),
+            "depth_confidence": self._resize_crop(
+                confidence_canvas.unsqueeze(1), mode="bilinear"
+            ).clamp_(0.0, 1.0),
         }
 
     def _load_instance_targets(
@@ -331,7 +357,8 @@ class LiberoAuxiliaryLabelLoader:
             frame_scores: list[np.ndarray] = []
             frame_camera_ids: list[np.ndarray] = []
             frame_masks: list[torch.Tensor] = []
-            for output_camera, stored_camera in enumerate(cameras):
+            for selected_camera, stored_camera in enumerate(cameras):
+                output_camera = self.canvas_camera_keys.index(self.camera_keys[selected_camera])
                 start = int(offsets[stored_camera, frame_pos])
                 end = int(offsets[stored_camera, frame_pos + 1])
                 boxes = np.asarray(flat_boxes[start:end], dtype=np.float32).copy()
@@ -422,14 +449,21 @@ class LiberoAuxiliaryLabelLoader:
             visibility_array[np.ix_(cameras, frames)].astype(np.float32)
         )
         # [C,T,N,2]. Cache coordinates are per-camera normalized xy.
-        num_cameras = len(cameras)
-        if num_cameras > 1:
+        local_query_points = points[:, 0].clone()
+        num_canvas_cameras = len(self.canvas_camera_keys)
+        if num_canvas_cameras > 1:
             if self.concat_multi_camera == "horizontal":
-                for camera in range(num_cameras):
-                    points[camera, ..., 0] = (points[camera, ..., 0] + camera) / num_cameras
+                for selected_camera, camera_key in enumerate(self.camera_keys):
+                    output_camera = self.canvas_camera_keys.index(camera_key)
+                    points[selected_camera, ..., 0] = (
+                        points[selected_camera, ..., 0] + output_camera
+                    ) / num_canvas_cameras
             else:
-                for camera in range(num_cameras):
-                    points[camera, ..., 1] = (points[camera, ..., 1] + camera) / num_cameras
+                for selected_camera, camera_key in enumerate(self.camera_keys):
+                    output_camera = self.canvas_camera_keys.index(camera_key)
+                    points[selected_camera, ..., 1] = (
+                        points[selected_camera, ..., 1] + output_camera
+                    ) / num_canvas_cameras
 
         # Apply the same final aspect-preserving resize and center crop as RGB.
         import json
@@ -461,13 +495,15 @@ class LiberoAuxiliaryLabelLoader:
         points = points.permute(0, 2, 1, 3).reshape(-1, len(frames), 2)
         visibility = visibility.permute(0, 2, 1).reshape(-1, len(frames))
         source = torch.from_numpy(arrays["motion_point_source"][cameras].astype(np.int64)).reshape(-1)
-        camera_ids = torch.arange(num_cameras, dtype=torch.int64).repeat_interleave(
-            points.shape[0] // num_cameras
-        )
+        selected_camera_count = len(cameras)
+        camera_ids = torch.tensor(
+            [self.canvas_camera_keys.index(key) for key in self.camera_keys], dtype=torch.int64
+        ).repeat_interleave(points.shape[0] // selected_camera_count)
         return {
             "trajectories": points,
             "traj_visibility": visibility,
             "traj_query_points": points[:, 0].clone(),
+            "traj_query_points_local": local_query_points.reshape(-1, 2),
             "traj_point_source": source,
             "traj_camera_indices": camera_ids,
         }
@@ -533,6 +569,11 @@ def auxiliary_collate_fn(batch: list[dict[str, Any]]) -> dict[str, Any]:
         trajectories = torch.zeros((batch_size, max_points, horizon, 2), dtype=torch.float32)
         visibility = torch.zeros((batch_size, max_points, horizon), dtype=torch.float32)
         query_points = torch.zeros((batch_size, max_points, 2), dtype=torch.float32)
+        local_query_points = (
+            torch.zeros((batch_size, max_points, 2), dtype=torch.float32)
+            if "traj_query_points_local" in keys
+            else None
+        )
         point_source = torch.full((batch_size, max_points), -1, dtype=torch.int64)
         camera_indices = torch.full((batch_size, max_points), -1, dtype=torch.int64)
         point_is_pad = torch.ones((batch_size, max_points), dtype=torch.bool)
@@ -541,6 +582,8 @@ def auxiliary_collate_fn(batch: list[dict[str, Any]]) -> dict[str, Any]:
             trajectories[index, :count] = sample["trajectories"]
             visibility[index, :count] = sample["traj_visibility"]
             query_points[index, :count] = sample["traj_query_points"]
+            if local_query_points is not None:
+                local_query_points[index, :count] = sample["traj_query_points_local"]
             point_source[index, :count] = sample["traj_point_source"]
             camera_indices[index, :count] = sample["traj_camera_indices"]
             point_is_pad[index, :count] = False
@@ -554,6 +597,8 @@ def auxiliary_collate_fn(batch: list[dict[str, Any]]) -> dict[str, Any]:
                 "traj_point_is_pad": point_is_pad,
             }
         )
+        if local_query_points is not None:
+            result["traj_query_points_local"] = local_query_points
     elif keys & _TRAJECTORY_KEYS:
         missing = sorted((keys & _TRAJECTORY_KEYS) - {"trajectories"})
         raise ValueError(f"Trajectory metadata exists without trajectories: {missing}")

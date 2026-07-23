@@ -163,7 +163,50 @@ class AuxiliaryLabelLoaderTest(unittest.TestCase):
         torch.testing.assert_close(sample["trajectories"][:2, :, 0], torch.full((2, 3), 0.25))
         torch.testing.assert_close(sample["trajectories"][2:, :, 0], torch.full((2, 3), 0.75))
         torch.testing.assert_close(sample["traj_query_points"], sample["trajectories"][:, 0])
+        torch.testing.assert_close(sample["traj_query_points_local"], torch.full((4, 2), 0.5))
         torch.testing.assert_close(sample["aux_frame_indices"], torch.tensor([1, 3, 5]))
+
+    def test_agentview_only_targets_keep_two_camera_canvas_alignment(self):
+        loader = LiberoAuxiliaryLabelLoader(
+            config={
+                "enabled": True,
+                "target_camera_keys": ["observation.images.image"],
+                "load_depth": True,
+                "load_bbox": True,
+                "load_mask": True,
+                "load_trajectory": True,
+                "depth_cache_dir": str(self.depth_root),
+                "bbox_cache_dir": str(self.bbox_root),
+                "trajectory_cache_dir": str(self.motion_root),
+            },
+            dataset_dirs=[str(self.dataset_dir)],
+            camera_keys=[
+                "observation.images.image",
+                "observation.images.wrist_image",
+            ],
+            video_size=[2, 4],
+            concat_multi_camera="horizontal",
+        )
+        sample = loader.load(dataset_index=0, episode_index=0, frame_indices=[1, 3, 5])
+
+        self.assertEqual(tuple(sample["depth"].shape), (3, 1, 2, 4))
+        self.assertTrue(bool((sample["depth"][..., 2:] == 0).all()))
+        self.assertTrue(bool((sample["depth_confidence"][..., :2] == 1).all()))
+        self.assertTrue(bool((sample["depth_confidence"][..., 2:] == 0).all()))
+        for boxes, masks, camera_ids in zip(
+            sample["boxes"], sample["masks"], sample["box_camera_indices"], strict=True
+        ):
+            torch.testing.assert_close(boxes, torch.tensor([[0.25, 0.5, 0.5, 1.0]]))
+            self.assertEqual(tuple(masks.shape), (1, 2, 4))
+            self.assertTrue(bool((masks[..., :2] == 1).all()))
+            self.assertTrue(bool((masks[..., 2:] == 0).all()))
+            torch.testing.assert_close(camera_ids, torch.zeros(1, dtype=torch.int64))
+        self.assertEqual(tuple(sample["trajectories"].shape), (2, 3, 2))
+        torch.testing.assert_close(sample["trajectories"][..., 0], torch.full((2, 3), 0.25))
+        torch.testing.assert_close(sample["traj_query_points_local"], torch.full((2, 2), 0.5))
+        torch.testing.assert_close(
+            sample["traj_camera_indices"], torch.zeros(2, dtype=torch.int64)
+        )
 
     def test_requires_exact_time_alignment(self):
         with self.assertRaisesRegex(ValueError, "no exact labels"):
@@ -176,7 +219,12 @@ class AuxiliaryLabelLoaderTest(unittest.TestCase):
             "mask": ({"load_mask": True}, {"masks"}),
             "trajectory": (
                 {"load_trajectory": True},
-                {"trajectories", "traj_visibility", "traj_query_points"},
+                {
+                    "trajectories",
+                    "traj_visibility",
+                    "traj_query_points",
+                    "traj_query_points_local",
+                },
             ),
         }
         roots = {
@@ -195,6 +243,7 @@ class AuxiliaryLabelLoaderTest(unittest.TestCase):
             "trajectories",
             "traj_visibility",
             "traj_query_points",
+            "traj_query_points_local",
             "traj_point_source",
             "traj_camera_indices",
         }
@@ -231,6 +280,7 @@ class AuxiliaryLabelLoaderTest(unittest.TestCase):
         second["trajectories"] = first["trajectories"][:3]
         second["traj_visibility"] = first["traj_visibility"][:3]
         second["traj_query_points"] = first["traj_query_points"][:3]
+        second["traj_query_points_local"] = first["traj_query_points_local"][:3]
         second["traj_point_source"] = first["traj_point_source"][:3]
         second["traj_camera_indices"] = first["traj_camera_indices"][:3]
         second["boxes"] = [value[:1] for value in first["boxes"]]
