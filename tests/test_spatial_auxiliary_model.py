@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
@@ -325,6 +326,43 @@ def test_trajectory_selection_uses_camera_local_queries():
     torch.testing.assert_close(
         targets["query_points"][0], torch.tensor([[0.25, 0.5], [0.75, 0.5]])
     )
+
+
+def test_trajectory_atm_random_sampling_and_temporal_patch_tokens():
+    model = build_tiny_model(["trajectory"])
+    branch = model.get_auxiliary_branch("trajectory")
+    sample = make_sample()
+    targets = prepare_trajectory_targets(
+        sample,
+        num_points=branch.num_points,
+        device=torch.device("cpu"),
+        random_sample=True,
+    )
+    assert targets["query_points"].shape == (1, branch.num_points, 2)
+    assert bool(targets["point_valid"].all())
+
+    state = branch.pre_dit(
+        query_points=targets["query_points"],
+        num_frames=sample["trajectories"].shape[2],
+        context=torch.randn(1, 3, 12),
+        context_mask=torch.ones(1, 3, dtype=torch.bool),
+    )
+    expected_time_patches = math.ceil(
+        sample["trajectories"].shape[2] / branch.track_patch_size
+    )
+    assert state["tokens"].shape[1] == branch.num_points * expected_time_patches
+
+
+def test_eval_can_explicitly_return_all_auxiliary_decoder_outputs():
+    model = build_tiny_model(["depth", "bbox", "mask", "trajectory"]).eval()
+    loss, metrics, outputs = model.training_loss(
+        make_sample(),
+        compute_auxiliary=True,
+        return_auxiliary_outputs=True,
+    )
+    assert torch.isfinite(loss)
+    assert set(outputs) == {"depth", "bbox", "mask", "trajectory"}
+    assert all(metrics[f"loss_{name}"] > 0 for name in outputs)
 
 
 def test_full_loss_baseline_switch_amp_and_inference_skip(monkeypatch):

@@ -129,25 +129,30 @@ class LiberoAuxiliaryLabelLoader:
         self.dataset_dirs = [Path(path) for path in dataset_dirs]
         self.suite_names = [path.name for path in self.dataset_dirs]
         self.canvas_camera_keys = list(camera_keys)
-        target_camera_keys = cfg.get("target_camera_keys", self.canvas_camera_keys)
-        if isinstance(target_camera_keys, str):
-            target_camera_keys = [target_camera_keys]
-        self.camera_keys = list(target_camera_keys)
-        self.target_hw = (int(video_size[0]), int(video_size[1]))
+        default_cameras = cfg.get("target_camera_keys", [self.canvas_camera_keys[0]])
+        configured_cameras = cfg.get("camera_keys", {})
+        self.modality_camera_keys: dict[str, list[str]] = {}
+        for modality in ("depth", "bbox", "mask", "trajectory"):
+            camera_selection = configured_cameras.get(modality, default_cameras)
+            if isinstance(camera_selection, str):
+                camera_selection = [camera_selection]
+            self.modality_camera_keys[modality] = list(camera_selection)
+        self.rgb_target_hw = (int(video_size[0]), int(video_size[1]))
         self.concat_multi_camera = concat_multi_camera
 
         if not self.enabled:
             return
         if not any((self.load_depth, self.load_bbox, self.load_mask, self.load_trajectory)):
             raise ValueError("auxiliary_labels.enabled=true but every modality is disabled")
-        if not self.camera_keys:
-            raise ValueError("auxiliary_labels.target_camera_keys cannot be empty")
-        unknown_cameras = [key for key in self.camera_keys if key not in self.canvas_camera_keys]
-        if unknown_cameras:
-            raise ValueError(
-                "auxiliary_labels.target_camera_keys must be a subset of the RGB cameras; "
-                f"unknown cameras: {unknown_cameras}"
-            )
+        for modality, selected in self.modality_camera_keys.items():
+            if not selected:
+                raise ValueError(f"auxiliary_labels.camera_keys.{modality} cannot be empty")
+            unknown_cameras = [key for key in selected if key not in self.canvas_camera_keys]
+            if unknown_cameras:
+                raise ValueError(
+                    f"auxiliary_labels.camera_keys.{modality} must be a subset of the RGB "
+                    f"cameras; unknown cameras: {unknown_cameras}"
+                )
         if len(self.canvas_camera_keys) > 1 and self.concat_multi_camera not in {"horizontal", "vertical"}:
             raise ValueError(
                 "LIBERO auxiliary labels currently support horizontal or vertical multi-camera "
@@ -202,12 +207,14 @@ class LiberoAuxiliaryLabelLoader:
                 f"got ({meta.get('suite')}, {meta.get('episode_index')})"
             )
 
-    def _camera_positions(self, arrays: dict[str, np.ndarray], path: Path) -> list[int]:
+    def _camera_positions(
+        self, arrays: dict[str, np.ndarray], path: Path, camera_keys: Sequence[str]
+    ) -> list[int]:
         stored = [str(key) for key in arrays["camera_keys"].tolist()]
-        missing = [key for key in self.camera_keys if key not in stored]
+        missing = [key for key in camera_keys if key not in stored]
         if missing:
             raise ValueError(f"Cache {path} is missing cameras {missing}; stored cameras are {stored}")
-        return [stored.index(key) for key in self.camera_keys]
+        return [stored.index(key) for key in camera_keys]
 
     @staticmethod
     def _frame_positions(
@@ -228,8 +235,10 @@ class LiberoAuxiliaryLabelLoader:
             )
         return positions.astype(np.int64)
 
-    def _layout(self, height: int, width: int) -> tuple[int, int, list[tuple[int, int]]]:
-        num_cameras = len(self.canvas_camera_keys)
+    def _layout(
+        self, height: int, width: int, camera_keys: Sequence[str]
+    ) -> tuple[int, int, list[tuple[int, int]]]:
+        num_cameras = len(camera_keys)
         if num_cameras == 1:
             return height, width, [(0, 0)]
         if self.concat_multi_camera == "horizontal":
@@ -238,9 +247,20 @@ class LiberoAuxiliaryLabelLoader:
             return height * num_cameras, width, [(i * height, 0) for i in range(num_cameras)]
         raise AssertionError("multi-camera layout was validated in __init__")
 
-    def _geometry(self, source_hw: tuple[int, int]) -> tuple[int, int, int, int, float, float]:
+    def _target_hw(self, camera_keys: Sequence[str]) -> tuple[int, int]:
+        target_h, target_w = self.rgb_target_hw
+        num_rgb = len(self.canvas_camera_keys)
+        if num_rgb == 1:
+            return target_h, target_w
+        if self.concat_multi_camera == "horizontal":
+            return target_h, (target_w // num_rgb) * len(camera_keys)
+        return (target_h // num_rgb) * len(camera_keys), target_w
+
+    def _geometry(
+        self, source_hw: tuple[int, int], target_hw: tuple[int, int]
+    ) -> tuple[int, int, int, int, float, float]:
         source_h, source_w = source_hw
-        target_h, target_w = self.target_hw
+        target_h, target_w = target_hw
         scale = max(target_w / source_w, target_h / source_h)
         resized_h = int(scale * source_h + 0.5)
         resized_w = int(scale * source_w + 0.5)
@@ -248,14 +268,16 @@ class LiberoAuxiliaryLabelLoader:
         crop_left = int(round((resized_w - target_w) / 2.0))
         return resized_h, resized_w, crop_top, crop_left, resized_h / source_h, resized_w / source_w
 
-    def _resize_crop(self, tensor: torch.Tensor, *, mode: str) -> torch.Tensor:
+    def _resize_crop(
+        self, tensor: torch.Tensor, *, mode: str, target_hw: tuple[int, int]
+    ) -> torch.Tensor:
         source_hw = (int(tensor.shape[-2]), int(tensor.shape[-1]))
-        resized_h, resized_w, top, left, _sy, _sx = self._geometry(source_hw)
+        resized_h, resized_w, top, left, _sy, _sx = self._geometry(source_hw, target_hw)
         kwargs = {"size": (resized_h, resized_w), "mode": mode}
         if mode in {"bilinear", "bicubic"}:
             kwargs["align_corners"] = False
         out = F.interpolate(tensor.float(), **kwargs)
-        target_h, target_w = self.target_hw
+        target_h, target_w = target_hw
         return out[..., top : top + target_h, left : left + target_w]
 
     def _load_depth_targets(
@@ -268,21 +290,19 @@ class LiberoAuxiliaryLabelLoader:
             keys={"frame_indices", "camera_keys", "depth", "depth_conf", "meta_json"},
         )
         self._validate_identity(arrays, path=path, suite=suite, episode=episode)
-        cameras = self._camera_positions(arrays, path)
+        camera_keys = self.modality_camera_keys["depth"]
+        cameras = self._camera_positions(arrays, path, camera_keys)
         frames = self._frame_positions(arrays, requested, path)
         depth_array = arrays["depth"]
         conf_array = arrays.get("depth_conf", np.ones_like(depth_array))
         depth = torch.from_numpy(depth_array[np.ix_(cameras, frames)].astype(np.float32))
         confidence = torch.from_numpy(conf_array[np.ix_(cameras, frames)].astype(np.float32))
-        # Compose selected supervision cameras into the unchanged RGB canvas.
-        # Unselected camera regions have zero confidence and do not affect loss.
         camera_h, camera_w = map(int, depth.shape[-2:])
-        canvas_h, canvas_w, origins = self._layout(camera_h, camera_w)
+        canvas_h, canvas_w, origins = self._layout(camera_h, camera_w, camera_keys)
         depth_canvas = torch.zeros((len(frames), canvas_h, canvas_w), dtype=torch.float32)
         confidence_canvas = torch.zeros_like(depth_canvas)
-        for selected_index, camera_key in enumerate(self.camera_keys):
-            output_camera = self.canvas_camera_keys.index(camera_key)
-            y_offset, x_offset = origins[output_camera]
+        for selected_index, _camera_key in enumerate(camera_keys):
+            y_offset, x_offset = origins[selected_index]
             depth_canvas[:, y_offset : y_offset + camera_h, x_offset : x_offset + camera_w] = depth[
                 selected_index
             ]
@@ -292,14 +312,25 @@ class LiberoAuxiliaryLabelLoader:
         return {
             # Preserve the cache's depth convention (relative, inverse, or
             # metric).  Only confidence is intrinsically bounded to [0, 1].
-            "depth": self._resize_crop(depth_canvas.unsqueeze(1), mode="bilinear"),
+            "depth": self._resize_crop(
+                depth_canvas.unsqueeze(1), mode="bilinear", target_hw=self._target_hw(camera_keys)
+            ),
             "depth_confidence": self._resize_crop(
-                confidence_canvas.unsqueeze(1), mode="bilinear"
+                confidence_canvas.unsqueeze(1),
+                mode="bilinear",
+                target_hw=self._target_hw(camera_keys),
             ).clamp_(0.0, 1.0),
         }
 
     def _load_instance_targets(
-        self, suite: str, episode: int, requested: np.ndarray
+        self,
+        suite: str,
+        episode: int,
+        requested: np.ndarray,
+        *,
+        camera_keys: Sequence[str],
+        include_bbox: bool,
+        include_mask: bool,
     ) -> dict[str, list[torch.Tensor]]:
         assert self.bbox_root is not None
         path = self._episode_path(self.bbox_root, suite, episode, "bbox")
@@ -311,18 +342,18 @@ class LiberoAuxiliaryLabelLoader:
             "bbox_offsets",
             "meta_json",
         }
-        if self.load_mask:
+        if include_mask:
             bbox_keys.add("bbox_masks")
         arrays = self._bbox_cache.load(path, keys=bbox_keys)
         self._validate_identity(arrays, path=path, suite=suite, episode=episode)
-        cameras = self._camera_positions(arrays, path)
+        cameras = self._camera_positions(arrays, path, camera_keys)
         frames = self._frame_positions(arrays, requested, path)
 
         offsets = arrays["bbox_offsets"]
         flat_boxes = arrays["bbox_xyxy"]
         flat_scores = arrays["bbox_confidences"]
         flat_masks = arrays.get("bbox_masks")
-        if self.load_mask and flat_masks is None:
+        if include_mask and flat_masks is None:
             raise ValueError(
                 f"Mask loading is enabled but {path} has no bbox_masks. "
                 "Generate caches with preprocess_libero_bbox.py --bbox-backend grounded_sam2."
@@ -340,8 +371,11 @@ class LiberoAuxiliaryLabelLoader:
                 camera_h, camera_w = int(image_size[0]), int(image_size[1])
             else:
                 camera_h = camera_w = int(image_size)
-        canvas_h, canvas_w, origins = self._layout(camera_h, camera_w)
-        resized_h, resized_w, top, left, scale_y, scale_x = self._geometry((canvas_h, canvas_w))
+        canvas_h, canvas_w, origins = self._layout(camera_h, camera_w, camera_keys)
+        target_hw = self._target_hw(camera_keys)
+        resized_h, resized_w, top, left, scale_y, scale_x = self._geometry(
+            (canvas_h, canvas_w), target_hw
+        )
 
         result: dict[str, list[torch.Tensor]] = {
             "boxes": [],
@@ -349,7 +383,7 @@ class LiberoAuxiliaryLabelLoader:
             "box_scores": [],
             "box_camera_indices": [],
         }
-        if self.load_mask:
+        if include_mask:
             result["masks"] = []
 
         for frame_pos in frames:
@@ -358,11 +392,11 @@ class LiberoAuxiliaryLabelLoader:
             frame_camera_ids: list[np.ndarray] = []
             frame_masks: list[torch.Tensor] = []
             for selected_camera, stored_camera in enumerate(cameras):
-                output_camera = self.canvas_camera_keys.index(self.camera_keys[selected_camera])
+                output_camera = self.canvas_camera_keys.index(camera_keys[selected_camera])
                 start = int(offsets[stored_camera, frame_pos])
                 end = int(offsets[stored_camera, frame_pos + 1])
                 boxes = np.asarray(flat_boxes[start:end], dtype=np.float32).copy()
-                y_offset, x_offset = origins[output_camera]
+                y_offset, x_offset = origins[selected_camera]
                 if len(boxes):
                     boxes[:, (0, 2)] += x_offset
                     boxes[:, (1, 3)] += y_offset
@@ -371,7 +405,7 @@ class LiberoAuxiliaryLabelLoader:
                     frame_camera_ids.append(
                         np.full((len(boxes),), output_camera, dtype=np.int64)
                     )
-                if self.load_mask and end > start:
+                if include_mask and end > start:
                     assert flat_masks is not None
                     masks = torch.from_numpy(flat_masks[start:end].astype(np.float32))
                     canvas = torch.zeros((len(masks), canvas_h, canvas_w), dtype=torch.float32)
@@ -384,18 +418,18 @@ class LiberoAuxiliaryLabelLoader:
                 camera_ids = torch.from_numpy(np.concatenate(frame_camera_ids, axis=0))
                 boxes_xyxy[:, (0, 2)] = boxes_xyxy[:, (0, 2)] * scale_x - left
                 boxes_xyxy[:, (1, 3)] = boxes_xyxy[:, (1, 3)] * scale_y - top
-                boxes_xyxy[:, (0, 2)].clamp_(0, self.target_hw[1])
-                boxes_xyxy[:, (1, 3)].clamp_(0, self.target_hw[0])
+                boxes_xyxy[:, (0, 2)].clamp_(0, target_hw[1])
+                boxes_xyxy[:, (1, 3)].clamp_(0, target_hw[0])
                 keep = (boxes_xyxy[:, 2] > boxes_xyxy[:, 0]) & (
                     boxes_xyxy[:, 3] > boxes_xyxy[:, 1]
                 )
                 boxes_xyxy = boxes_xyxy[keep]
                 scores = scores[keep]
                 camera_ids = camera_ids[keep]
-                cx = (boxes_xyxy[:, 0] + boxes_xyxy[:, 2]) * 0.5 / self.target_hw[1]
-                cy = (boxes_xyxy[:, 1] + boxes_xyxy[:, 3]) * 0.5 / self.target_hw[0]
-                width = (boxes_xyxy[:, 2] - boxes_xyxy[:, 0]) / self.target_hw[1]
-                height = (boxes_xyxy[:, 3] - boxes_xyxy[:, 1]) / self.target_hw[0]
+                cx = (boxes_xyxy[:, 0] + boxes_xyxy[:, 2]) * 0.5 / target_hw[1]
+                cy = (boxes_xyxy[:, 1] + boxes_xyxy[:, 3]) * 0.5 / target_hw[0]
+                width = (boxes_xyxy[:, 2] - boxes_xyxy[:, 0]) / target_hw[1]
+                height = (boxes_xyxy[:, 3] - boxes_xyxy[:, 1]) / target_hw[0]
                 boxes_cxcywh = torch.stack((cx, cy, width, height), dim=-1).clamp_(0.0, 1.0)
             else:
                 keep = torch.zeros((0,), dtype=torch.bool)
@@ -409,16 +443,18 @@ class LiberoAuxiliaryLabelLoader:
             result["box_labels"].append(torch.zeros(len(boxes_cxcywh), dtype=torch.int64))
             result["box_scores"].append(scores)
             result["box_camera_indices"].append(camera_ids)
-            if self.load_mask:
+            if include_mask:
                 if frame_masks:
                     masks = torch.cat(frame_masks, dim=0).unsqueeze(1)
-                    masks = self._resize_crop(masks, mode="nearest").squeeze(1)
+                    masks = self._resize_crop(
+                        masks, mode="nearest", target_hw=target_hw
+                    ).squeeze(1)
                     masks = masks[keep].to(dtype=torch.float32)
                 else:
-                    masks = torch.zeros((0, *self.target_hw), dtype=torch.float32)
+                    masks = torch.zeros((0, *target_hw), dtype=torch.float32)
                 result["masks"].append(masks)
 
-        if not self.load_bbox:
+        if not include_bbox:
             for key in ("boxes", "box_labels", "box_scores", "box_camera_indices"):
                 result.pop(key)
         return result
@@ -440,7 +476,8 @@ class LiberoAuxiliaryLabelLoader:
             },
         )
         self._validate_identity(arrays, path=path, suite=suite, episode=episode)
-        cameras = self._camera_positions(arrays, path)
+        camera_keys = self.modality_camera_keys["trajectory"]
+        cameras = self._camera_positions(arrays, path, camera_keys)
         frames = self._frame_positions(arrays, requested, path)
         points_array = arrays["motion_points"]
         visibility_array = arrays["motion_visibility"]
@@ -450,20 +487,18 @@ class LiberoAuxiliaryLabelLoader:
         )
         # [C,T,N,2]. Cache coordinates are per-camera normalized xy.
         local_query_points = points[:, 0].clone()
-        num_canvas_cameras = len(self.canvas_camera_keys)
-        if num_canvas_cameras > 1:
+        num_selected_cameras = len(camera_keys)
+        if num_selected_cameras > 1:
             if self.concat_multi_camera == "horizontal":
-                for selected_camera, camera_key in enumerate(self.camera_keys):
-                    output_camera = self.canvas_camera_keys.index(camera_key)
+                for selected_camera, _camera_key in enumerate(camera_keys):
                     points[selected_camera, ..., 0] = (
-                        points[selected_camera, ..., 0] + output_camera
-                    ) / num_canvas_cameras
+                        points[selected_camera, ..., 0] + selected_camera
+                    ) / num_selected_cameras
             else:
-                for selected_camera, camera_key in enumerate(self.camera_keys):
-                    output_camera = self.canvas_camera_keys.index(camera_key)
+                for selected_camera, _camera_key in enumerate(camera_keys):
                     points[selected_camera, ..., 1] = (
-                        points[selected_camera, ..., 1] + output_camera
-                    ) / num_canvas_cameras
+                        points[selected_camera, ..., 1] + selected_camera
+                    ) / num_selected_cameras
 
         # Apply the same final aspect-preserving resize and center crop as RGB.
         import json
@@ -474,14 +509,17 @@ class LiberoAuxiliaryLabelLoader:
             camera_h, camera_w = int(image_size[0]), int(image_size[1])
         else:
             camera_h = camera_w = int(image_size)
-        canvas_h, canvas_w, _origins = self._layout(camera_h, camera_w)
-        _rh, _rw, top, left, scale_y, scale_x = self._geometry((canvas_h, canvas_w))
+        canvas_h, canvas_w, _origins = self._layout(camera_h, camera_w, camera_keys)
+        target_hw = self._target_hw(camera_keys)
+        _rh, _rw, top, left, scale_y, scale_x = self._geometry(
+            (canvas_h, canvas_w), target_hw
+        )
         points[..., 0] = (
             points[..., 0] * canvas_w * scale_x - left
-        ) / self.target_hw[1]
+        ) / target_hw[1]
         points[..., 1] = (
             points[..., 1] * canvas_h * scale_y - top
-        ) / self.target_hw[0]
+        ) / target_hw[0]
         in_frame = (
             (points[..., 0] >= 0.0)
             & (points[..., 0] <= 1.0)
@@ -497,7 +535,7 @@ class LiberoAuxiliaryLabelLoader:
         source = torch.from_numpy(arrays["motion_point_source"][cameras].astype(np.int64)).reshape(-1)
         selected_camera_count = len(cameras)
         camera_ids = torch.tensor(
-            [self.canvas_camera_keys.index(key) for key in self.camera_keys], dtype=torch.int64
+            [self.canvas_camera_keys.index(key) for key in camera_keys], dtype=torch.int64
         ).repeat_interleave(points.shape[0] // selected_camera_count)
         return {
             "trajectories": points,
@@ -531,8 +569,33 @@ class LiberoAuxiliaryLabelLoader:
         }
         if self.load_depth:
             result.update(self._load_depth_targets(suite, episode, requested))
-        if self.load_bbox or self.load_mask:
-            result.update(self._load_instance_targets(suite, episode, requested))
+        if self.load_bbox:
+            bbox_cameras = self.modality_camera_keys["bbox"]
+            result.update(
+                self._load_instance_targets(
+                    suite,
+                    episode,
+                    requested,
+                    camera_keys=bbox_cameras,
+                    include_bbox=True,
+                    include_mask=self.load_mask
+                    and bbox_cameras == self.modality_camera_keys["mask"],
+                )
+            )
+        if self.load_mask and (
+            not self.load_bbox
+            or self.modality_camera_keys["mask"] != self.modality_camera_keys["bbox"]
+        ):
+            result.update(
+                self._load_instance_targets(
+                    suite,
+                    episode,
+                    requested,
+                    camera_keys=self.modality_camera_keys["mask"],
+                    include_bbox=False,
+                    include_mask=True,
+                )
+            )
         if self.load_trajectory:
             result.update(self._load_trajectory_targets(suite, episode, requested))
         return result

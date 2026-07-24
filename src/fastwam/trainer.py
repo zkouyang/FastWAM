@@ -15,6 +15,8 @@ from PIL import Image
 from torch.optim.lr_scheduler import ConstantLR, CosineAnnealingLR, LinearLR, SequentialLR
 from torch.utils.data import DataLoader
 
+from .datasets.auxiliary_labels import auxiliary_collate_fn
+from .utils.auxiliary_visualization import save_auxiliary_visualizations
 from .utils.fs import ensure_dir
 from .utils.logging_config import get_logger, setup_logging
 from .utils.pytorch_utils import set_global_seed
@@ -332,6 +334,8 @@ class Wan22Trainer:
 
     @staticmethod
     def _to_batched_eval_sample(sample):
+        auxiliary_sample = "aux_frame_indices" in sample
+        collated_sample = auxiliary_collate_fn([sample]) if auxiliary_sample else None
         video = sample["video"]
         prompt = sample["prompt"]
         action = sample.get("action", None)
@@ -399,7 +403,7 @@ class Wan22Trainer:
                     f"`context/context_mask` must be [B,L,D]/[B,L], got {tuple(context.shape)} and {tuple(context_mask.shape)}"
                 )
 
-        return {
+        result = {
             "video": video,
             "prompt": prompt,
             "action": action,
@@ -408,6 +412,16 @@ class Wan22Trainer:
             "context_mask": context_mask,
             "action_horizon": action_horizon,
         }
+        if collated_sample is not None:
+            baseline_keys = set(result)
+            result.update(
+                {
+                    key: value
+                    for key, value in collated_sample.items()
+                    if key not in baseline_keys
+                }
+            )
+        return result
 
     @torch.no_grad()
     def evaluate(self):
@@ -424,9 +438,23 @@ class Wan22Trainer:
         sample = self._to_batched_eval_sample(self.val_dataset[eval_index])
 
         # 1. training loss
+        compute_auxiliary = bool(getattr(model, "auxiliary_branch_names", ()))
         with self.accelerator.autocast():
-            val_loss, _ = model.training_loss(sample)
-            val_loss = val_loss.float().item()
+            if compute_auxiliary:
+                val_loss_tensor, val_loss_dict, auxiliary_outputs = model.training_loss(
+                    sample,
+                    compute_auxiliary=True,
+                    return_auxiliary_outputs=True,
+                )
+            else:
+                val_loss_tensor, val_loss_dict = model.training_loss(sample)
+                auxiliary_outputs = {}
+            val_loss = val_loss_tensor.float().item()
+        auxiliary_paths = save_auxiliary_visualizations(
+            auxiliary_outputs,
+            self.eval_dir,
+            prefix=f"step_{self.global_step:06d}_rank_{self.accelerator.process_index:03d}",
+        )
         
         prompt = sample["prompt"][0]
         video0 = sample["video"][0] # Tensor [3, T, H, W] in (-1, 1)
@@ -561,6 +589,15 @@ class Wan22Trainer:
         )
         save_mp4(stitched_frames, video_path, fps=8)
 
+        loss_names = (
+            "loss_video",
+            "loss_action",
+            "loss_depth",
+            "loss_bbox",
+            "loss_mask",
+            "loss_trajectory",
+            "loss_total",
+        )
         local_metrics = torch.tensor(
             [
                 float(val_loss),
@@ -572,6 +609,7 @@ class Wan22Trainer:
                 float(ssim_decode_vs_gt),
                 float(action_l2) if action_l2 is not None else -1.0,
                 float(action_l1) if action_l1 is not None else -1.0,
+                *[float(val_loss_dict.get(name, 0.0)) for name in loss_names],
             ],
             device=self.accelerator.device,
             dtype=torch.float32,
@@ -593,6 +631,11 @@ class Wan22Trainer:
             "psnr_dg": float(mean_metrics[5].item()),
             "ssim_dg": float(mean_metrics[6].item()),
             "video_path": video_path,
+            "auxiliary_paths": auxiliary_paths,
+            **{
+                name: float(gathered_metrics[:, 9 + index].mean().item())
+                for index, name in enumerate(loss_names)
+            },
         }
         if action_l2_mean is not None:
             result["action_l2"] = float(action_l2_mean)
@@ -793,6 +836,25 @@ class Wan22Trainer:
                                 eval_payload["eval/action_l2"] = float(metrics["action_l2"])
                             if "action_l1" in metrics:
                                 eval_payload["eval/action_l1"] = float(metrics["action_l1"])
+                            for loss_name in (
+                                "loss_video",
+                                "loss_action",
+                                "loss_depth",
+                                "loss_bbox",
+                                "loss_mask",
+                                "loss_trajectory",
+                                "loss_total",
+                            ):
+                                if loss_name in metrics:
+                                    eval_payload[f"eval/{loss_name}"] = float(metrics[loss_name])
+                            if self.wandb_run is not None:
+                                import wandb
+
+                                eval_payload["eval/video"] = wandb.Video(
+                                    metrics["video_path"], fps=8, format="mp4"
+                                )
+                                for name, path in metrics.get("auxiliary_paths", {}).items():
+                                    eval_payload[f"eval/{name}_prediction_vs_gt"] = wandb.Image(path)
                             self._wandb_log(eval_payload)
 
                     if self.save_every > 0 and self.global_step % self.save_every == 0:

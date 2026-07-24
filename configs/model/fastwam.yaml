@@ -71,7 +71,6 @@ auxiliary:
   common:
     # The horizontal LIBERO canvas is [agentview, wrist]. Auxiliary queries
     # condition on agentview Video K/V only; Action keeps both cameras.
-    conditioning_camera_indices: [0]
     conditioning_num_cameras: 2
     hidden_dim: 256
     ffn_dim: 1024
@@ -80,6 +79,7 @@ auxiliary:
     use_gradient_checkpointing: ${model.mot_checkpoint_mixed_attn}
   depth:
     enabled: false
+    conditioning_camera_indices: [0]
     init_from_video_dit: false
     output_size: [128, 128]
     decoder_dim: 32
@@ -87,6 +87,7 @@ auxiliary:
     alpha_grad: 0.0
   bbox:
     enabled: false
+    conditioning_camera_indices: [0]
     init_from_video_dit: false
     num_queries: 16
     num_classes: 1
@@ -94,6 +95,7 @@ auxiliary:
     beta_giou: 2.0
   mask:
     enabled: false
+    conditioning_camera_indices: [0]
     init_from_video_dit: false
     num_queries: 16
     output_size: [128, 128]
@@ -102,7 +104,10 @@ auxiliary:
     beta_dice: 1.0
   trajectory:
     enabled: false
+    conditioning_camera_indices: [0]
     init_from_video_dit: false
-    num_points: 64
+    # ATM LIBERO default: 32 first-frame-visible tracks per enabled view.
+    num_points: 32
     horizon: null
+    track_patch_size: 4
     beta_vis: 1.0

@@ -465,14 +465,28 @@ class FastWAM(torch.nn.Module):
             device=device,
         )
         first_frame_end = video_start + min(video_tokens_per_frame, seq_lens["video"])
-        auxiliary_video_keys: slice | torch.Tensor = slice(video_start, first_frame_end)
         common_cfg = dict(self.auxiliary_config.get("common", {}))
-        camera_indices = common_cfg.get("conditioning_camera_indices")
-        if camera_indices is not None:
+        auxiliary_video_keys: dict[str, slice | torch.Tensor] = {}
+        for name in active:
+            if name in {"video", "action"}:
+                continue
+            branch_cfg = dict(self.auxiliary_config.get(name, {}))
+            camera_indices = branch_cfg.get(
+                "conditioning_camera_indices",
+                common_cfg.get("conditioning_camera_indices"),
+            )
+            if camera_indices is None:
+                auxiliary_video_keys[name] = slice(video_start, first_frame_end)
+                continue
             if video_grid_size is None:
                 raise ValueError("video_grid_size is required for camera-specific auxiliary attention")
             _frames, grid_h, grid_w = map(int, video_grid_size)
-            num_cameras = int(common_cfg.get("conditioning_num_cameras", 1))
+            num_cameras = int(
+                branch_cfg.get(
+                    "conditioning_num_cameras",
+                    common_cfg.get("conditioning_num_cameras", 1),
+                )
+            )
             if num_cameras <= 0 or grid_w % num_cameras != 0:
                 raise ValueError(
                     f"Video token grid width {grid_w} is not divisible by {num_cameras} cameras"
@@ -492,7 +506,7 @@ class FastWAM(torch.nn.Module):
                         f"[0, {num_cameras})"
                     )
                 selected[:, camera_index * camera_width : (camera_index + 1) * camera_width] = True
-            auxiliary_video_keys = torch.where(selected.flatten())[0] + video_start
+            auxiliary_video_keys[name] = torch.where(selected.flatten())[0] + video_start
         for name in active:
             if name == "video":
                 continue
@@ -501,7 +515,7 @@ class FastWAM(torch.nn.Module):
             if name == "action":
                 mask[start:end, video_start:first_frame_end] = True
             else:
-                mask[start:end, auxiliary_video_keys] = True
+                mask[start:end, auxiliary_video_keys[name]] = True
         return mask
 
     def get_auxiliary_branch(self, name: str) -> nn.Module:
@@ -548,7 +562,13 @@ class FastWAM(torch.nn.Module):
         valid_sum = valid.sum(dim=1).clamp(min=1.0)
         return (video_loss_token * valid).sum(dim=1) / valid_sum
 
-    def training_loss(self, sample, tiled: bool = False, compute_auxiliary: Optional[bool] = None):
+    def training_loss(
+        self,
+        sample,
+        tiled: bool = False,
+        compute_auxiliary: Optional[bool] = None,
+        return_auxiliary_outputs: bool = False,
+    ):
         inputs = self.build_inputs(sample, tiled=tiled)
         input_latents = inputs["input_latents"]
         batch_size = input_latents.shape[0]
@@ -601,7 +621,9 @@ class FastWAM(torch.nn.Module):
         use_auxiliary = self.compute_auxiliary if compute_auxiliary is None else bool(compute_auxiliary)
         # The trainer keeps frozen VAE/text modules in eval mode and only puts
         # `model.dit` (the MoT) in train mode.
-        use_auxiliary = use_auxiliary and self.mot.training and bool(self.auxiliary_branch_names)
+        if compute_auxiliary is None:
+            use_auxiliary = use_auxiliary and self.mot.training
+        use_auxiliary = use_auxiliary and bool(self.auxiliary_branch_names)
         pre_states: dict[str, dict[str, Any]] = {"video": video_pre, "action": action_pre}
         trajectory_targets = None
         if use_auxiliary:
@@ -641,8 +663,18 @@ class FastWAM(torch.nn.Module):
                 if missing:
                     raise KeyError(f"Trajectory branch is enabled but sample fields are missing: {missing}")
                 trajectory_branch = self.get_auxiliary_branch("trajectory")
+                trajectory_cfg = dict(self.auxiliary_config.get("trajectory", {}))
+                common_aux_cfg = dict(self.auxiliary_config.get("common", {}))
+                trajectory_cameras = trajectory_cfg.get(
+                    "conditioning_camera_indices",
+                    common_aux_cfg.get("conditioning_camera_indices", [0]),
+                )
+                point_budget = trajectory_branch.num_points * len(trajectory_cameras)
                 trajectory_targets = prepare_trajectory_targets(
-                    sample, num_points=trajectory_branch.num_points, device=self.device
+                    sample,
+                    num_points=point_budget,
+                    device=self.device,
+                    random_sample=self.mot.training,
                 )
                 trajectory_horizon = int(trajectory_targets["coords"].shape[2])
                 pre_states["trajectory"] = trajectory_branch.pre_dit(
@@ -710,12 +742,17 @@ class FastWAM(torch.nn.Module):
             "mask": zero,
             "trajectory": zero,
         }
+        auxiliary_outputs: dict[str, Any] = {}
         if use_auxiliary:
             aux_cfg = self.auxiliary_config
             if "depth" in pre_states:
                 pred_depth = self.get_auxiliary_branch("depth").post_dit(
                     tokens_out["depth"], pre_states["depth"]
                 )
+                auxiliary_outputs["depth"] = {
+                    "prediction": pred_depth,
+                    "target": sample["depth"],
+                }
                 depth_cfg = dict(aux_cfg.get("depth", {}))
                 auxiliary_losses["depth"] = depth_regression_loss(
                     pred_depth,
@@ -727,6 +764,10 @@ class FastWAM(torch.nn.Module):
                 pred_bbox = self.get_auxiliary_branch("bbox").post_dit(
                     tokens_out["bbox"], pre_states["bbox"]
                 )
+                auxiliary_outputs["bbox"] = {
+                    "prediction": pred_bbox,
+                    "target": sample["boxes"],
+                }
                 bbox_cfg = dict(aux_cfg.get("bbox", {}))
                 auxiliary_losses["bbox"] = bbox_hungarian_loss(
                     pred_bbox,
@@ -739,6 +780,10 @@ class FastWAM(torch.nn.Module):
                 pred_masks = self.get_auxiliary_branch("mask").post_dit(
                     tokens_out["mask"], pre_states["mask"]
                 )
+                auxiliary_outputs["mask"] = {
+                    "prediction": pred_masks,
+                    "target": sample["masks"],
+                }
                 mask_cfg = dict(aux_cfg.get("mask", {}))
                 auxiliary_losses["mask"] = mask_hungarian_loss(
                     pred_masks,
@@ -750,6 +795,10 @@ class FastWAM(torch.nn.Module):
                 pred_trajectory = self.get_auxiliary_branch("trajectory").post_dit(
                     tokens_out["trajectory"], pre_states["trajectory"]
                 )
+                auxiliary_outputs["trajectory"] = {
+                    "prediction": pred_trajectory,
+                    "target": trajectory_targets,
+                }
                 trajectory_cfg = dict(aux_cfg.get("trajectory", {}))
                 auxiliary_losses["trajectory"] = trajectory_loss(
                     pred_trajectory,
@@ -779,6 +828,8 @@ class FastWAM(torch.nn.Module):
             },
             "loss_total": float(loss_total.detach().item()),
         }
+        if return_auxiliary_outputs:
+            return loss_total, loss_dict, auxiliary_outputs
         return loss_total, loss_dict
 
     @torch.no_grad()

@@ -19,10 +19,12 @@ class MaskDiTBranch(AuxiliaryVideoDiTBranch):
         output_size: Sequence[int] = (128, 128),
         mask_dim: int = 32,
         feature_grid: Sequence[int] = (8, 8),
+        horizon: Optional[int] = None,
         **kwargs,
     ):
         super().__init__(**kwargs)
         self.num_queries = int(num_queries)
+        self.horizon = None if horizon is None else int(horizon)
         self.output_size = (int(output_size[0]), int(output_size[1]))
         self.mask_dim = int(mask_dim)
         self.feature_grid = (int(feature_grid[0]), int(feature_grid[1]))
@@ -36,6 +38,8 @@ class MaskDiTBranch(AuxiliaryVideoDiTBranch):
         self.query_head = make_mlp(self.hidden_dim, self.mask_dim, layers=3)
 
     def pre_dit(self, *, batch_size: int, num_frames: int, context, context_mask: Optional[torch.Tensor]):
+        if self.horizon is not None and num_frames != self.horizon:
+            raise ValueError(f"mask horizon {num_frames} != configured {self.horizon}")
         one_frame = torch.cat((self.image_query, self.mask_queries), dim=1)
         tokens = one_frame.unsqueeze(1).expand(batch_size, num_frames, -1, -1)
         return self._prepare_tokens(

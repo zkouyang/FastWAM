@@ -86,6 +86,8 @@ class AuxiliaryVideoDiTBranch(nn.Module):
         context: torch.Tensor,
         context_mask: Optional[torch.Tensor],
         timestep: Optional[torch.Tensor] = None,
+        add_frame_embedding: bool = True,
+        rope_position_ids: Optional[torch.Tensor] = None,
         meta: Optional[dict[str, Any]] = None,
     ) -> dict[str, Any]:
         if tokens.ndim != 3:
@@ -110,9 +112,25 @@ class AuxiliaryVideoDiTBranch(nn.Module):
         if context_mask.shape != context.shape[:2]:
             raise ValueError("context_mask must have shape [B,L]")
 
-        frame_pos = self.frame_embedding[:, :num_frames].expand(batch_size, -1, tokens_per_frame, -1)
         tokens = tokens.view(batch_size, num_frames, tokens_per_frame, hidden_dim)
-        tokens = (tokens + frame_pos.to(dtype=tokens.dtype, device=tokens.device)).flatten(1, 2)
+        if add_frame_embedding:
+            frame_pos = self.frame_embedding[:, :num_frames].expand(
+                batch_size, -1, tokens_per_frame, -1
+            )
+            tokens = tokens + frame_pos.to(dtype=tokens.dtype, device=tokens.device)
+        tokens = tokens.flatten(1, 2)
+        if rope_position_ids is None:
+            freqs = self.freqs[:seq_len]
+        else:
+            if rope_position_ids.ndim != 1 or rope_position_ids.shape[0] != seq_len:
+                raise ValueError(
+                    "rope_position_ids must be [S] and match token sequence length, "
+                    f"got {tuple(rope_position_ids.shape)} vs {seq_len}"
+                )
+            rope_position_ids = rope_position_ids.to(device=self.freqs.device, dtype=torch.long)
+            if int(rope_position_ids.min()) < 0 or int(rope_position_ids.max()) >= self.max_tokens:
+                raise ValueError("rope_position_ids are outside the configured RoPE cache")
+            freqs = self.freqs[rope_position_ids]
 
         if timestep is None:
             timestep = torch.zeros((batch_size,), dtype=tokens.dtype, device=tokens.device)
@@ -132,7 +150,7 @@ class AuxiliaryVideoDiTBranch(nn.Module):
             payload_meta.update(meta)
         return {
             "tokens": tokens,
-            "freqs": self.freqs[:seq_len].view(seq_len, 1, -1).to(tokens.device),
+            "freqs": freqs.view(seq_len, 1, -1).to(tokens.device),
             "t": t,
             "t_mod": t_mod,
             "context": context_emb,

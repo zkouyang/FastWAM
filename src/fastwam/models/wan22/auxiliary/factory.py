@@ -64,6 +64,8 @@ def build_auxiliary_branches(
             "beta_dice",
             "beta_vis",
             "use_atm_track_transformer",
+            "conditioning_camera_indices",
+            "conditioning_num_cameras",
         }:
             branch_cfg.pop(loss_key, None)
         init_from_video = bool(branch_cfg.pop("init_from_video_dit", False))

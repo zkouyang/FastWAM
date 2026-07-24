@@ -94,6 +94,12 @@ class AuxiliaryLabelLoaderTest(unittest.TestCase):
         self.loader = LiberoAuxiliaryLabelLoader(
             config={
                 "enabled": True,
+                "camera_keys": {
+                    "depth": cameras.tolist(),
+                    "bbox": cameras.tolist(),
+                    "mask": cameras.tolist(),
+                    "trajectory": cameras.tolist(),
+                },
                 "load_depth": True,
                 "load_bbox": True,
                 "load_mask": True,
@@ -166,11 +172,16 @@ class AuxiliaryLabelLoaderTest(unittest.TestCase):
         torch.testing.assert_close(sample["traj_query_points_local"], torch.full((4, 2), 0.5))
         torch.testing.assert_close(sample["aux_frame_indices"], torch.tensor([1, 3, 5]))
 
-    def test_agentview_only_targets_keep_two_camera_canvas_alignment(self):
+    def test_agentview_only_targets_use_single_view_canvas(self):
         loader = LiberoAuxiliaryLabelLoader(
             config={
                 "enabled": True,
-                "target_camera_keys": ["observation.images.image"],
+                "camera_keys": {
+                    "depth": ["observation.images.image"],
+                    "bbox": ["observation.images.image"],
+                    "mask": ["observation.images.image"],
+                    "trajectory": ["observation.images.image"],
+                },
                 "load_depth": True,
                 "load_bbox": True,
                 "load_mask": True,
@@ -189,20 +200,17 @@ class AuxiliaryLabelLoaderTest(unittest.TestCase):
         )
         sample = loader.load(dataset_index=0, episode_index=0, frame_indices=[1, 3, 5])
 
-        self.assertEqual(tuple(sample["depth"].shape), (3, 1, 2, 4))
-        self.assertTrue(bool((sample["depth"][..., 2:] == 0).all()))
-        self.assertTrue(bool((sample["depth_confidence"][..., :2] == 1).all()))
-        self.assertTrue(bool((sample["depth_confidence"][..., 2:] == 0).all()))
+        self.assertEqual(tuple(sample["depth"].shape), (3, 1, 2, 2))
+        self.assertTrue(bool((sample["depth_confidence"] == 1).all()))
         for boxes, masks, camera_ids in zip(
             sample["boxes"], sample["masks"], sample["box_camera_indices"], strict=True
         ):
-            torch.testing.assert_close(boxes, torch.tensor([[0.25, 0.5, 0.5, 1.0]]))
-            self.assertEqual(tuple(masks.shape), (1, 2, 4))
-            self.assertTrue(bool((masks[..., :2] == 1).all()))
-            self.assertTrue(bool((masks[..., 2:] == 0).all()))
+            torch.testing.assert_close(boxes, torch.tensor([[0.5, 0.5, 1.0, 1.0]]))
+            self.assertEqual(tuple(masks.shape), (1, 2, 2))
+            self.assertTrue(bool((masks == 1).all()))
             torch.testing.assert_close(camera_ids, torch.zeros(1, dtype=torch.int64))
         self.assertEqual(tuple(sample["trajectories"].shape), (2, 3, 2))
-        torch.testing.assert_close(sample["trajectories"][..., 0], torch.full((2, 3), 0.25))
+        torch.testing.assert_close(sample["trajectories"][..., 0], torch.full((2, 3), 0.5))
         torch.testing.assert_close(sample["traj_query_points_local"], torch.full((2, 2), 0.5))
         torch.testing.assert_close(
             sample["traj_camera_indices"], torch.zeros(2, dtype=torch.int64)

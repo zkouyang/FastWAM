@@ -217,6 +217,7 @@ def prepare_trajectory_targets(
     *,
     num_points: int,
     device: torch.device,
+    random_sample: bool = False,
 ) -> dict[str, torch.Tensor]:
     trajectories = sample["trajectories"].to(device=device, dtype=torch.float32)
     visibility = sample["traj_visibility"].to(device=device, dtype=torch.float32)
@@ -247,22 +248,30 @@ def prepare_trajectory_targets(
         for camera_pos, camera in enumerate(camera_values):
             candidate = torch.where(valid & (cameras[b] == camera))[0]
             allocation = remaining // max(1, len(camera_values) - camera_pos)
-            allocation = min(allocation, len(candidate))
             if allocation == 0:
                 continue
-            candidate_points = selection_queries[b, candidate]
-            grid = _double_grid(allocation, device=device)
-            distances = torch.cdist(grid, candidate_points)
-            chosen: list[int] = []
-            for row in range(len(grid)):
-                order = distances[row].argsort()
-                local = next((int(i) for i in order.tolist() if int(i) not in chosen), None)
-                if local is not None:
-                    chosen.append(local)
-            indices = candidate[torch.tensor(chosen, device=device)]
+            if random_sample:
+                # ATM samples first-frame-visible tracks uniformly with
+                # replacement. Replacement keeps a fixed token budget even
+                # when an episode contains fewer than num_points candidates.
+                indices = candidate[
+                    torch.randint(len(candidate), (allocation,), device=device)
+                ]
+            else:
+                allocation = min(allocation, len(candidate))
+                candidate_points = selection_queries[b, candidate]
+                grid = _double_grid(allocation, device=device)
+                distances = torch.cdist(grid, candidate_points)
+                chosen: list[int] = []
+                for row in range(len(grid)):
+                    order = distances[row].argsort()
+                    local = next((int(i) for i in order.tolist() if int(i) not in chosen), None)
+                    if local is not None:
+                        chosen.append(local)
+                indices = candidate[torch.tensor(chosen, device=device)]
             selected.append(indices)
             remaining -= len(indices)
-        if remaining > 0:
+        if remaining > 0 and not random_sample:
             all_valid = torch.where(valid)[0]
             already = torch.cat(selected) if selected else torch.empty(0, dtype=torch.long, device=device)
             keep = all_valid[~torch.isin(all_valid, already)][:remaining]

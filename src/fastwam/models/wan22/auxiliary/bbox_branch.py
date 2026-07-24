@@ -11,10 +11,18 @@ from .base_video_dit_branch import AuxiliaryVideoDiTBranch, make_mlp
 class BBoxDiTBranch(AuxiliaryVideoDiTBranch):
     """Independent DETR-like object-query expert."""
 
-    def __init__(self, *, num_queries: int = 16, num_classes: int = 1, **kwargs):
+    def __init__(
+        self,
+        *,
+        num_queries: int = 16,
+        num_classes: int = 1,
+        horizon: Optional[int] = None,
+        **kwargs,
+    ):
         super().__init__(**kwargs)
         self.num_queries = int(num_queries)
         self.num_classes = int(num_classes)
+        self.horizon = None if horizon is None else int(horizon)
         self.object_queries = nn.Parameter(
             torch.randn(1, self.num_queries, self.hidden_dim) / self.hidden_dim**0.5
         )
@@ -22,6 +30,8 @@ class BBoxDiTBranch(AuxiliaryVideoDiTBranch):
         self.box_head = make_mlp(self.hidden_dim, 4, layers=3)
 
     def pre_dit(self, *, batch_size: int, num_frames: int, context, context_mask: Optional[torch.Tensor]):
+        if self.horizon is not None and num_frames != self.horizon:
+            raise ValueError(f"bbox horizon {num_frames} != configured {self.horizon}")
         tokens = self.object_queries.unsqueeze(1).expand(batch_size, num_frames, -1, -1)
         return self._prepare_tokens(
             tokens.flatten(1, 2),

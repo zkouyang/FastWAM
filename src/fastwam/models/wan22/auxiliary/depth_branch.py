@@ -18,9 +18,11 @@ class DepthDiTBranch(AuxiliaryVideoDiTBranch):
         output_size: Sequence[int] = (128, 128),
         decoder_dim: int = 32,
         decoder_grid: Sequence[int] = (8, 8),
+        horizon: Optional[int] = None,
         **kwargs,
     ):
         super().__init__(**kwargs)
+        self.horizon = None if horizon is None else int(horizon)
         self.output_size = (int(output_size[0]), int(output_size[1]))
         self.decoder_dim = int(decoder_dim)
         self.decoder_grid = (int(decoder_grid[0]), int(decoder_grid[1]))
@@ -43,6 +45,8 @@ class DepthDiTBranch(AuxiliaryVideoDiTBranch):
         context: torch.Tensor,
         context_mask: Optional[torch.Tensor],
     ):
+        if self.horizon is not None and num_frames != self.horizon:
+            raise ValueError(f"depth horizon {num_frames} != configured {self.horizon}")
         tokens = self.depth_queries.expand(batch_size, num_frames, -1)
         return self._prepare_tokens(
             tokens,
