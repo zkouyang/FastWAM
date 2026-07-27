@@ -592,17 +592,26 @@ model:
     enabled: false
 ```
 
-For Full training, override the top-level and four branch flags:
+For Full training on 4x A800 80GB, use ZeRO-2, gradient checkpointing, and an
+effective global batch size of 128:
 
 ```bash
-python scripts/train.py \
+bash scripts/train_zero2.sh 4 \
+  task=libero_uncond_2cam224_1e-4 \
   data.train.auxiliary_labels.enabled=true \
   model.auxiliary.enabled=true \
   model.auxiliary.depth.enabled=true \
   model.auxiliary.bbox.enabled=true \
   model.auxiliary.mask.enabled=true \
-  model.auxiliary.trajectory.enabled=true
+  model.auxiliary.trajectory.enabled=true \
+  model.mot_checkpoint_mixed_attn=true \
+  batch_size=2 \
+  gradient_accumulation_steps=16 \
+  num_workers=4
 ```
+
+Here `batch_size` is per GPU, so `2 x 4 GPUs x 16 accumulation steps` keeps
+the effective global batch size at 128.
 
 The combined objective logs `loss_video`, `loss_action`, `loss_depth`,
 `loss_bbox`, `loss_mask`, `loss_trajectory`, and `loss_total`. Auxiliary

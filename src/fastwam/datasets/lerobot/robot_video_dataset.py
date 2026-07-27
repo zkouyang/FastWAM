@@ -96,17 +96,6 @@ class RobotVideoDataset(torch.utils.data.Dataset):
         self.collate_fn = (
             auxiliary_collate_fn if self.auxiliary_label_loader.enabled else None
         )
-        if self.lerobot_dataset.processor is not None:
-            set_identity = getattr(
-                self.lerobot_dataset.processor, "set_return_source_identity", None
-            )
-            if set_identity is not None:
-                set_identity(self.auxiliary_label_loader.enabled)
-            elif self.auxiliary_label_loader.enabled:
-                raise TypeError(
-                    "Auxiliary labels require a processor that preserves dataset_index, "
-                    "episode_index, and frame_index."
-                )
 
         self.resize_transform = ResizeSmallestSideAspectPreserving(
             args={"img_w": self.video_size[1], "img_h": self.video_size[0]},
@@ -120,6 +109,14 @@ class RobotVideoDataset(torch.utils.data.Dataset):
         if processor is not None:
             if isinstance(processor, DictConfig):
                 processor = instantiate(processor)
+            set_identity = getattr(processor, "set_return_source_identity", None)
+            if set_identity is not None:
+                set_identity(self.auxiliary_label_loader.enabled)
+            elif self.auxiliary_label_loader.enabled:
+                raise TypeError(
+                    "Auxiliary labels require a processor that preserves dataset_index, "
+                    "episode_index, and frame_index."
+                )
             if not pretrained_norm_stats:
                 if not is_training_set:
                     raise ValueError("pretrained_norm_stats must be provided for validation/test sets since we don't want to calculate stats on them.")
