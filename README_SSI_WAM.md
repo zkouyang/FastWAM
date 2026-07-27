@@ -592,11 +592,12 @@ model:
     enabled: false
 ```
 
-For Full training on 4x A800 80GB, use ZeRO-2, gradient checkpointing, and an
+For full training on 4x A800 80GB, use ZeRO-1, gradient checkpointing, and an
 effective global batch size of 128:
 
 ```bash
-bash scripts/train_zero2.sh 4 \
+export CUDA_VISIBLE_DEVICES=4,5,6,7
+bash scripts/train_zero1.sh 4 \
   task=libero_uncond_2cam224_1e-4 \
   data.train.auxiliary_labels.enabled=true \
   model.auxiliary.enabled=true \
@@ -607,11 +608,14 @@ bash scripts/train_zero2.sh 4 \
   model.mot_checkpoint_mixed_attn=true \
   batch_size=2 \
   gradient_accumulation_steps=16 \
-  num_workers=4
+  num_workers=4 \
+  log_every=1
 ```
 
 Here `batch_size` is per GPU, so `2 x 4 GPUs x 16 accumulation steps` keeps
-the effective global batch size at 128.
+the effective global batch size at 128. Use ZeRO-1 for the full auxiliary
+model: on 4x A800, the current ZeRO-2 gradient-partition path can spend most
+of each backward pass waiting in gradient reduction.
 
 The combined objective logs `loss_video`, `loss_action`, `loss_depth`,
 `loss_bbox`, `loss_mask`, `loss_trajectory`, and `loss_total`. Auxiliary
