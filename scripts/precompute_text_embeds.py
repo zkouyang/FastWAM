@@ -13,7 +13,10 @@ import torch.distributed as dist
 from omegaconf import DictConfig, ListConfig
 from tqdm import tqdm
 
-from fastwam.datasets.lerobot.robot_video_dataset import DEFAULT_PROMPT
+from fastwam.datasets.lerobot.robot_video_dataset import (
+    DEFAULT_PROMPT,
+    select_libero_dataset_dirs,
+)
 from fastwam.models.wan22.helpers.loader import _load_registered_model, _resolve_configs
 from fastwam.models.wan22.wan_video_text_encoder import HuggingfaceTokenizer
 from fastwam.utils.config_resolvers import register_default_resolvers
@@ -84,7 +87,11 @@ def _collect_dataset_settings(data_cfg: DictConfig):
                 "(this node defines `dataset_dirs`)."
             )
 
-        for ds in raw_dirs:
+        selected_dirs = select_libero_dataset_dirs(
+            raw_dirs,
+            node.get("libero_suite"),
+        )
+        for ds in selected_dirs:
             ds_str = str(ds)
             if ds_str not in dataset_dirs:
                 dataset_dirs.append(ds_str)
@@ -97,7 +104,11 @@ def _collect_dataset_settings(data_cfg: DictConfig):
         if context_len is not None:
             context_lens.add(int(context_len))
 
-        logger.info("Discovered dataset node `%s` with %d dataset_dirs.", node_path, len(raw_dirs))
+        logger.info(
+            "Discovered dataset node `%s` with %d selected dataset_dirs.",
+            node_path,
+            len(selected_dirs),
+        )
 
     return dataset_dirs, cache_dirs, context_lens
 

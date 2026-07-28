@@ -27,6 +27,48 @@ logger = get_logger(__name__)
 
 DEFAULT_PROMPT = "A video recorded from a robot's point of view executing the following instruction: {task}"
 
+
+_LIBERO_SUITE_DIRNAMES = {
+    "libero-spatial": "libero_spatial_no_noops_lerobot",
+    "libero-object": "libero_object_no_noops_lerobot",
+    "libero-goal": "libero_goal_no_noops_lerobot",
+    "libero-10": "libero_10_no_noops_lerobot",
+}
+
+
+def select_libero_dataset_dirs(dataset_dirs, libero_suite: Optional[str] = None):
+    """Select one configured LIBERO suite while preserving all-data defaults."""
+    dataset_dirs = [str(path) for path in dataset_dirs]
+    if libero_suite is None:
+        return dataset_dirs
+
+    suite = str(libero_suite).strip().lower().replace("_", "-")
+    if suite in {"", "all", "libero", "libero-all"}:
+        return dataset_dirs
+    if not suite.startswith("libero-"):
+        suite = f"libero-{suite}"
+
+    target_dirname = _LIBERO_SUITE_DIRNAMES.get(suite)
+    if target_dirname is None:
+        supported = ", ".join(_LIBERO_SUITE_DIRNAMES)
+        raise ValueError(
+            f"Unsupported libero_suite={libero_suite!r}. "
+            f"Expected one of: {supported}, or all."
+        )
+
+    selected = [
+        path
+        for path in dataset_dirs
+        if os.path.basename(os.path.normpath(path)) == target_dirname
+    ]
+    if not selected:
+        raise ValueError(
+            f"libero_suite={libero_suite!r} maps to {target_dirname!r}, "
+            "but that directory is not present in dataset_dirs."
+        )
+    return selected
+
+
 class RobotVideoDataset(torch.utils.data.Dataset):
     def __init__(
         self,
@@ -48,7 +90,15 @@ class RobotVideoDataset(torch.utils.data.Dataset):
         concat_multi_camera: str = "horizontal", # "horizontal", "vertical", "robotwin", or None
         override_instruction: Optional[str] = None, # whether to hardcode a specific instruction for all samples, for debugging
         auxiliary_labels=None,
+        libero_suite: Optional[str] = None,
     ):
+        dataset_dirs = select_libero_dataset_dirs(dataset_dirs, libero_suite)
+        if libero_suite is not None:
+            logger.info(
+                "LIBERO suite selection %r resolved to dataset_dirs=%s",
+                libero_suite,
+                dataset_dirs,
+            )
         self.lerobot_dataset = BaseLerobotDataset(
             dataset_dirs=dataset_dirs,
             shape_meta=OmegaConf.to_container(shape_meta, resolve=True),

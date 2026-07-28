@@ -12,7 +12,36 @@ from fastwam.datasets.auxiliary_labels import (
     auxiliary_collate_fn,
 )
 from fastwam.datasets.dataset_utils import CenterCrop, Normalize, ResizeSmallestSideAspectPreserving
-from fastwam.datasets.lerobot.robot_video_dataset import RobotVideoDataset
+from fastwam.datasets.lerobot.robot_video_dataset import (
+    RobotVideoDataset,
+    select_libero_dataset_dirs,
+)
+
+
+class LiberoSuiteSelectionTest(unittest.TestCase):
+    def setUp(self):
+        self.dataset_dirs = [
+            "./data/libero_spatial_no_noops_lerobot",
+            "./data/libero_object_no_noops_lerobot",
+            "./data/libero_goal_no_noops_lerobot",
+            "./data/libero_10_no_noops_lerobot",
+        ]
+
+    def test_default_keeps_all_suites(self):
+        self.assertEqual(
+            select_libero_dataset_dirs(self.dataset_dirs),
+            self.dataset_dirs,
+        )
+
+    def test_libero_10_selects_only_matching_suite(self):
+        self.assertEqual(
+            select_libero_dataset_dirs(self.dataset_dirs, "libero-10"),
+            [self.dataset_dirs[-1]],
+        )
+
+    def test_invalid_suite_fails_clearly(self):
+        with self.assertRaisesRegex(ValueError, "Unsupported libero_suite"):
+            select_libero_dataset_dirs(self.dataset_dirs, "libero-90")
 
 
 class AuxiliaryLabelLoaderTest(unittest.TestCase):

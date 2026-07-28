@@ -5,6 +5,9 @@ train:
     - ./data/libero_mujoco3.3.2/libero_object_no_noops_lerobot
     - ./data/libero_mujoco3.3.2/libero_goal_no_noops_lerobot
     - ./data/libero_mujoco3.3.2/libero_10_no_noops_lerobot
+  # null/all keeps every suite; optionally use libero-spatial, libero-object,
+  # libero-goal, or libero-10.
+  libero_suite: null
   shape_meta:
     images:
       - key: image

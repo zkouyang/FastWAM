@@ -617,6 +617,17 @@ the effective global batch size at 128. Use ZeRO-1 for the full auxiliary
 model: on 4x A800, the current ZeRO-2 gradient-partition path can spend most
 of each backward pass waiting in gradient reduction.
 
+The default `data.train.libero_suite=null` uses all four configured LIBERO
+suites. To train only one suite, add an override such as:
+
+```bash
+data.train.libero_suite=libero-10
+```
+
+The supported values are `libero-spatial`, `libero-object`, `libero-goal`,
+and `libero-10`. The same override can be passed to
+`scripts/precompute_text_embeds.py`.
+
 The combined objective logs `loss_video`, `loss_action`, `loss_depth`,
 `loss_bbox`, `loss_mask`, `loss_trajectory`, and `loss_total`. Auxiliary
 parameters are registered inside `model.dit`, so the existing optimizer,
