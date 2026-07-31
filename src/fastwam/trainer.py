@@ -45,6 +45,7 @@ class Wan22Trainer:
         self.save_every = int(cfg.save_every)
         self.eval_every = int(cfg.eval_every)
         self.eval_num_inference_steps = int(cfg.eval_num_inference_steps)
+        self.eval_auxiliary_save_video = bool(cfg.get("eval_auxiliary_save_video", False))
         self.gradient_accumulation_steps = int(cfg.gradient_accumulation_steps)
         self.max_grad_norm = float(cfg.max_grad_norm)
         self.seed = int(cfg.seed)
@@ -450,14 +451,16 @@ class Wan22Trainer:
                 val_loss_tensor, val_loss_dict = model.training_loss(sample)
                 auxiliary_outputs = {}
             val_loss = val_loss_tensor.float().item()
+        video0 = sample["video"][0] # Tensor [3, T, H, W] in (-1, 1)
         auxiliary_paths = save_auxiliary_visualizations(
             auxiliary_outputs,
             self.eval_dir,
             prefix=f"step_{self.global_step:06d}_rank_{self.accelerator.process_index:03d}",
+            rgb_video=video0,
+            save_video=self.eval_auxiliary_save_video,
         )
         
         prompt = sample["prompt"][0]
-        video0 = sample["video"][0] # Tensor [3, T, H, W] in (-1, 1)
         action = sample["action"][0] if "action" in sample and sample["action"] is not None else None
         proprio = sample["proprio"][0, 0] if "proprio" in sample and sample["proprio"] is not None else None # from [1, T, d] to [d]
         input_image = video0[:, 0].unsqueeze(0)
@@ -860,7 +863,12 @@ class Wan22Trainer:
                                     metrics["video_path"], fps=8, format="mp4"
                                 )
                                 for name, path in metrics.get("auxiliary_paths", {}).items():
-                                    eval_payload[f"eval/{name}_prediction_vs_gt"] = wandb.Image(path)
+                                    artifact = (
+                                        wandb.Video(path, fps=8, format="mp4")
+                                        if path.endswith(".mp4")
+                                        else wandb.Image(path)
+                                    )
+                                    eval_payload[f"eval/{name}_label_vs_inference"] = artifact
                             self._wandb_log(eval_payload)
 
                     if self.save_every > 0 and self.global_step % self.save_every == 0:

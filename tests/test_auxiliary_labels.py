@@ -2,9 +2,11 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import numpy as np
 import torch
+from PIL import Image
 
 from fastwam.datasets.auxiliary_labels import (
     AuxiliaryLabelLoadingError,
@@ -16,6 +18,86 @@ from fastwam.datasets.lerobot.robot_video_dataset import (
     RobotVideoDataset,
     select_libero_dataset_dirs,
 )
+from fastwam.utils.auxiliary_visualization import save_auxiliary_visualizations
+
+
+class AuxiliaryVisualizationTest(unittest.TestCase):
+    @staticmethod
+    def _outputs():
+        target_mask = torch.zeros((1, 4, 4))
+        target_mask[:, 1:3, 1:3] = 1
+        pred_mask = torch.full((1, 2, 1, 2, 2), -10.0)
+        pred_mask[:, :, :, :1, :1] = 10.0
+        return {
+            "depth": {
+                "prediction": torch.tensor([[[[[0.0, 0.5], [0.5, 1.0]]], [[[1.0, 0.5], [0.5, 0.0]]]]]),
+                "target": torch.linspace(0, 1, 32).view(1, 2, 1, 4, 4),
+            },
+            "bbox": {
+                "prediction": {
+                    "pred_logits": torch.tensor([[[[10.0]], [[10.0]]]]),
+                    "pred_boxes": torch.tensor([[[[0.75, 0.75, 0.2, 0.2]], [[0.75, 0.75, 0.2, 0.2]]]]),
+                },
+                "target": [[torch.tensor([[0.25, 0.25, 0.2, 0.2]]), torch.tensor([[0.25, 0.25, 0.2, 0.2]])]],
+            },
+            "mask": {
+                "prediction": pred_mask,
+                "target": [[target_mask, target_mask]],
+            },
+            "trajectory": {
+                "prediction": {
+                    "pred_coords": torch.tensor([[[[0.7, 0.7], [0.8, 0.8]]]]),
+                    "pred_visibility": torch.full((1, 1, 2), 10.0),
+                },
+                "target": {
+                    "coords": torch.tensor([[[[0.2, 0.2], [0.3, 0.3]]]]),
+                    "visibility": torch.ones((1, 1, 2)),
+                    "point_valid": torch.ones((1, 1), dtype=torch.bool),
+                },
+            },
+        }
+
+    @staticmethod
+    def _rgb_video():
+        rgb = torch.full((3, 2, 4, 8), -1.0)
+        rgb[:, :, :, :4] = 0.0
+        rgb[2, :, :, 4:] = 1.0
+        return rgb
+
+    def test_default_saves_label_left_inference_right_pngs(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            paths = save_auxiliary_visualizations(
+                self._outputs(), tempdir, prefix="sample", rgb_video=self._rgb_video()
+            )
+            self.assertEqual(set(paths), {"depth", "bbox", "mask", "trajectory"})
+            for path in paths.values():
+                self.assertEqual(Image.open(path).size, (448, 256))
+
+            bbox = np.asarray(Image.open(paths["bbox"]).convert("RGB"))
+            # The RGB overlay uses the gray left agent view, not the blue wrist view.
+            np.testing.assert_array_equal(bbox[132, 112], np.array([127, 127, 127]))
+            # Label box is green on the left; inference box is red on the right.
+            self.assertGreater(bbox[66, 56, 1], bbox[66, 56, 0])
+            self.assertGreater(bbox[178, 392, 0], bbox[178, 392, 1])
+
+    @mock.patch("fastwam.utils.auxiliary_visualization.save_mp4")
+    def test_video_option_saves_depth_bbox_and_mask_horizons(self, save_mp4_mock):
+        with tempfile.TemporaryDirectory() as tempdir:
+            paths = save_auxiliary_visualizations(
+                self._outputs(),
+                tempdir,
+                prefix="sample",
+                rgb_video=self._rgb_video(),
+                save_video=True,
+            )
+        self.assertEqual(
+            {name for name in paths if name.endswith("_video")},
+            {"depth_video", "bbox_video", "mask_video"},
+        )
+        self.assertEqual(save_mp4_mock.call_count, 3)
+        for call in save_mp4_mock.call_args_list:
+            self.assertEqual(len(call.args[0]), 2)
+            self.assertEqual(call.args[0][0].size, (448, 256))
 
 
 class LiberoSuiteSelectionTest(unittest.TestCase):

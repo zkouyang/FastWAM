@@ -634,6 +634,12 @@ parameters are registered inside `model.dit`, so the existing optimizer,
 gradient accumulation, AMP, DDP, and checkpoint code includes them without a
 second optimizer.
 
+Auxiliary evaluation PNGs store the offline label on the left and the module
+decoding on the right. BBox, mask, and trajectory outputs are overlaid on the
+matching RGB agent view. The default saves the first frame only; add
+`eval_auxiliary_save_video=true` to also save full-horizon depth, bbox, and
+mask MP4 files.
+
 `infer_action()` still uses only Video prefill plus cached Video K/V and Action
 denoising. Its inputs and `[action_horizon, action_dim]` output are unchanged;
 it never creates or calls auxiliary tokens/heads. A Full checkpoint can be
