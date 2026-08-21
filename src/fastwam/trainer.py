@@ -43,6 +43,7 @@ class Wan22Trainer:
         self.max_steps = int(max_steps) if max_steps is not None else None
         self.log_every = int(cfg.log_every)
         self.save_every = int(cfg.save_every)
+        self.save_training_state = bool(cfg.get("save_training_state", False))
         self.eval_every = int(cfg.eval_every)
         self.eval_num_inference_steps = int(cfg.eval_num_inference_steps)
         self.eval_auxiliary_save_video = bool(cfg.get("eval_auxiliary_save_video", False))
@@ -118,7 +119,8 @@ class Wan22Trainer:
         ensure_dir(self.output_dir)
         ensure_dir(self.checkpoint_root)
         ensure_dir(self.weights_dir)
-        ensure_dir(self.state_dir)
+        if self.save_training_state:
+            ensure_dir(self.state_dir)
         ensure_dir(self.eval_dir)
 
         self.model, self.optimizer, self.train_loader, self.scheduler = self.accelerator.prepare(
@@ -671,12 +673,14 @@ class Wan22Trainer:
             ckpt_path = self._save_weights_checkpoint(step_tag=step_tag)
         self.accelerator.wait_for_everyone()
 
-        state_path = os.path.join(self.state_dir, step_tag)
-        ensure_dir(state_path)
-        self.accelerator.save_state(output_dir=state_path)
-        if self.accelerator.is_main_process:
-            self._save_trainer_state(state_path)
-        self.accelerator.wait_for_everyone()
+        state_path = None
+        if self.save_training_state:
+            state_path = os.path.join(self.state_dir, step_tag)
+            ensure_dir(state_path)
+            self.accelerator.save_state(output_dir=state_path)
+            if self.accelerator.is_main_process:
+                self._save_trainer_state(state_path)
+            self.accelerator.wait_for_everyone()
 
         return {"weights_path": ckpt_path, "state_path": state_path}
 

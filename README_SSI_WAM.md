@@ -609,6 +609,7 @@ bash scripts/train_zero1.sh 4 \
   batch_size=2 \
   gradient_accumulation_steps=16 \
   num_workers=4 \
+  save_training_state=false \
   log_every=1
 ```
 
@@ -616,6 +617,11 @@ Here `batch_size` is per GPU, so `2 x 4 GPUs x 16 accumulation steps` keeps
 the effective global batch size at 128. Use ZeRO-1 for the full auxiliary
 model: on 4x A800, the current ZeRO-2 gradient-partition path can spend most
 of each backward pass waiting in gradient reduction.
+
+By default, training saves only `checkpoints/weights/step_*.pt` and skips the
+much larger DeepSpeed state directories. This is sufficient for inference and
+weight-only initialization. Add `save_training_state=true` when exact resume
+of the optimizer, scheduler, RNG, and dataloader position is required.
 
 The default `data.train.libero_suite=null` uses all four configured LIBERO
 suites. To train only one suite, add an override such as:
