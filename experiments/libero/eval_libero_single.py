@@ -7,6 +7,10 @@ import time
 from pathlib import Path
 from typing import Any, Optional
 
+os.environ.setdefault("MUJOCO_GL", "egl")
+os.environ.setdefault("PYOPENGL_PLATFORM", "egl")
+os.environ.setdefault("TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD", "1")
+
 import hydra
 import numpy as np
 import torch

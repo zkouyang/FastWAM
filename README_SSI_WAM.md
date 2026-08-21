@@ -646,6 +646,74 @@ it never creates or calls auxiliary tokens/heads. A Full checkpoint can be
 loaded with all auxiliary branches disabled because checkpoint loading is
 non-strict for optional MoT experts.
 
+## LIBERO evaluation
+
+Evaluation requires the official LIBERO environment and a compatible MuJoCo
+installation in the `fastwam` environment. Verify the environment before the
+first run:
+
+```bash
+conda activate fastwam
+python -c 'from libero.libero import benchmark; print("LIBERO import OK")'
+```
+
+The evaluation manager forwards the active Python executable to every tmux
+worker, so no separate tmux activation or `PYTHONPATH` export is needed. The
+worker also selects headless EGL automatically. For a formal 4-GPU evaluation
+of the final 2026-08-17 checkpoint on LIBERO-10, run:
+
+```bash
+conda activate fastwam
+export CUDA_VISIBLE_DEVICES=0,1,2,3
+
+python experiments/libero/run_libero_manager.py \
+  task=libero_uncond_2cam224_1e-4 \
+  ckpt=./runs/libero_uncond_2cam224_1e-4/2026-08-17_15-41-25/checkpoints/weights/step_008150.pt \
+  EVALUATION.dataset_stats_path=./runs/libero_uncond_2cam224_1e-4/2026-08-17_15-41-25/dataset_stats.json \
+  EVALUATION.num_trials=50 \
+  eval_num_inference_steps=10 \
+  EVALUATION.visualize_future_video=false \
+  model.auxiliary.enabled=false \
+  'MULTIRUN.task_suite_names=[libero_10]' \
+  MULTIRUN.num_gpus=4 \
+  MULTIRUN.max_tasks_per_gpu=1 \
+  EVALUATION.output_dir=./evaluate_results/libero/ssi_wam_2026-08-17_step8150_libero10
+```
+
+`model.auxiliary.enabled=false` is intentional: the offline depth, bbox, mask,
+and trajectory branches shape the shared Video representation during training
+but are not instantiated or explicitly inferred during deployment. The formal
+command evaluates all 10 LIBERO-10 tasks with 50 episodes per task, for 500
+episodes in total. For a quick end-to-end smoke test, change only
+`EVALUATION.num_trials=1` and use a separate output directory.
+
+The manager dynamically schedules at most one task process per GPU with the
+settings above. One evaluation process uses approximately 24--26 GiB of GPU
+memory; changing the number of trials primarily changes runtime rather than
+peak memory. `MULTIRUN.task_suite_names` uses benchmark names with underscores,
+such as `libero_10`, `libero_goal`, `libero_spatial`, and `libero_object`.
+
+The output directory contains:
+
+```text
+evaluate_results/libero/<run_name>/
+├── summary.json
+├── summary.csv
+├── task_success_rates.csv
+├── failed_tasks.txt
+├── manager_config.yaml
+├── task_logs/
+└── libero_10/
+    ├── gpu*_task*_results.json
+    └── videos/*.mp4
+```
+
+A complete LIBERO-10 run should contain 10 task result JSON files, one result
+per task, and an empty `failed_tasks.txt`. `summary.json` is the authoritative
+machine-readable aggregate; `summary.csv` and `task_success_rates.csv` provide
+suite-level and per-task tables. Worker logs and rollout videos are retained
+for failure diagnosis and qualitative inspection.
+
 ### Verification
 
 Run the project-owned tests (the repository's `third_party/` trees contain
