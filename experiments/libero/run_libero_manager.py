@@ -64,6 +64,7 @@ def _is_blocked_override(raw_override: str) -> bool:
         "task",
         "ckpt",
         "gpu_id",
+        "EVALUATION.output_dir",
         "EVALUATION.task_suite_name",
         "EVALUATION.task_id",
     }
