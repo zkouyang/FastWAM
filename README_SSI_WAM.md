@@ -693,6 +693,31 @@ command evaluates all 10 LIBERO-10 tasks with 50 episodes per task, for 500
 episodes in total. For a quick end-to-end smoke test, change only
 `EVALUATION.num_trials=1` and use a separate output directory.
 
+To evaluate every saved checkpoint from one training run, pass either the run
+directory or its `checkpoints/weights` directory to `ckpt`:
+
+```bash
+python experiments/libero/run_libero_manager.py \
+  task=libero_uncond_2cam224_1e-4 \
+  ckpt=./runs/libero_uncond_2cam224_1e-4/2026-08-31_16-39-40 \
+  EVALUATION.dataset_stats_path=./runs/libero_uncond_2cam224_1e-4/2026-08-31_16-39-40/dataset_stats.json \
+  EVALUATION.num_trials=50 \
+  eval_num_inference_steps=10 \
+  EVALUATION.visualize_future_video=false \
+  model.auxiliary.enabled=false \
+  'MULTIRUN.task_suite_names=[libero_10]' \
+  MULTIRUN.num_gpus=4 \
+  MULTIRUN.max_tasks_per_gpu=1 \
+  EVALUATION.output_dir=./evaluate_results/libero/ssi_wam_2026-08-31_all_ckpts_libero10
+```
+
+The manager discovers `step_*.pt` files, sorts them by numeric step, and
+evaluates checkpoints sequentially so they do not compete for the same GPUs.
+Each checkpoint retains the normal per-task GPU parallelism and writes to an
+independent subdirectory such as `step_002000/` or `step_008150/`. Passing one
+checkpoint file preserves the original single-checkpoint behavior and output
+layout. A failure stops the sequence at that checkpoint.
+
 The manager dynamically schedules at most one task process per GPU with the
 settings above. One evaluation process uses approximately 24--26 GiB of GPU
 memory; changing the number of trials primarily changes runtime rather than

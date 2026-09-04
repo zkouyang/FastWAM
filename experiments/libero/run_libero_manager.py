@@ -1,4 +1,5 @@
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -9,6 +10,32 @@ import hydra
 from hydra.core.hydra_config import HydraConfig
 from libero.libero import benchmark
 from omegaconf import DictConfig, OmegaConf
+
+
+def _checkpoint_sort_key(path: Path) -> tuple[int, str]:
+    match = re.fullmatch(r"step_(\d+)", path.stem)
+    return (int(match.group(1)) if match else sys.maxsize, path.name)
+
+
+def resolve_checkpoints(ckpt: str) -> tuple[list[Path], bool]:
+    """Resolve one checkpoint file or all step checkpoints under a directory."""
+
+    path = Path(os.path.expanduser(os.path.expandvars(ckpt)))
+    if path.is_file():
+        return [path], False
+    if not path.exists():
+        raise FileNotFoundError(f"Checkpoint path not found: {path}")
+    if not path.is_dir():
+        raise ValueError(f"Checkpoint path must be a file or directory: {path}")
+
+    for candidate_dir in (path, path / "weights", path / "checkpoints" / "weights"):
+        checkpoints = sorted(candidate_dir.glob("step_*.pt"), key=_checkpoint_sort_key)
+        if checkpoints:
+            return checkpoints, True
+    raise FileNotFoundError(
+        f"No step_*.pt checkpoints found in {path}, {path / 'weights'}, or "
+        f"{path / 'checkpoints' / 'weights'}"
+    )
 
 
 def create_task_file(output_file: Path, task_suite_names: list[str]) -> Path:
@@ -149,16 +176,23 @@ def main(cfg: DictConfig):
         print("create_only=True, only create the task list and exit.")
         return
 
-    run_evaluation(
-        task_file=task_file,
-        task_choice=task_choice,
-        ckpt=str(cfg.ckpt),
-        num_gpus=int(manager.num_gpus),
-        num_trials=int(cfg.EVALUATION.num_trials),
-        max_tasks_per_gpu=int(manager.max_tasks_per_gpu),
-        output_dir=output_dir,
-        extra_overrides=collect_worker_overrides(),
-    )
+    checkpoints, checkpoint_batch = resolve_checkpoints(str(cfg.ckpt))
+    if checkpoint_batch:
+        print(f"\nFound {len(checkpoints)} checkpoints under {cfg.ckpt}.")
+    for index, checkpoint in enumerate(checkpoints, start=1):
+        checkpoint_output_dir = output_dir / checkpoint.stem if checkpoint_batch else output_dir
+        if checkpoint_batch:
+            print(f"\nCheckpoint {index}/{len(checkpoints)}: {checkpoint}")
+        run_evaluation(
+            task_file=task_file,
+            task_choice=task_choice,
+            ckpt=str(checkpoint),
+            num_gpus=int(manager.num_gpus),
+            num_trials=int(cfg.EVALUATION.num_trials),
+            max_tasks_per_gpu=int(manager.max_tasks_per_gpu),
+            output_dir=checkpoint_output_dir,
+            extra_overrides=collect_worker_overrides(),
+        )
 
 
 if __name__ == "__main__":
