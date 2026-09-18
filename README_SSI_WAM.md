@@ -565,7 +565,9 @@ does not create a unified SSI encoder and the branches do not share parameters.
 
 The task outputs and losses are:
 
-- Depth: `[B,T,1,H,W]`, SmoothL1 plus optional gradient loss.
+- Depth: `[B,T,1,224,224]`, SmoothL1 plus a default `0.5` gradient-loss
+  coefficient. The target stays at its native cache resolution during loss
+  computation.
 - BBox: `[B,T,Q,C]` logits and normalized `[B,T,Q,4]` `cx,cy,w,h`, with
   classification + Hungarian-matched L1/GIoU loss.
 - Mask: independent query-to-mask logits `[B,T,Q,H,W]`, with its own
@@ -576,12 +578,56 @@ The task outputs and losses are:
 
 During mixed MoT training, Action reads its own tokens and both cameras'
 clean first-frame Video K/V. Each auxiliary expert reads its own tokens and
-only the configured agentview region of first-frame Video K/V. Auxiliary
-targets likewise contain agentview only while remaining aligned to the
-two-camera canvas. Auxiliary experts cannot read one another, and Action
-cannot read auxiliary tokens or head outputs. This gives every auxiliary loss
-a gradient path into the Video world representation used by Action inference
-without changing the action input.
+only the configured agentview region of first-frame Video K/V. The Depth head
+additionally consumes the final first-frame agentview Video token grid as a
+spatial feature map. Auxiliary targets likewise contain agentview only while
+remaining aligned to the two-camera canvas. Auxiliary experts cannot read one
+another, and Action cannot read auxiliary tokens or head outputs. This gives
+every auxiliary loss a gradient path into the Video world representation used
+by Action inference without changing the action input.
+
+### Depth spatial decoder
+
+Depth keeps exactly one MoT query per output frame. For the default nine-frame
+LIBERO window this remains nine Depth tokens; no dense Depth query grid is
+inserted into the 30-layer mixed attention. Spatial detail is recovered only
+in the lightweight output head:
+
+```text
+final first-frame Video tokens [B, 7, 14, 3072]
+  -> select agentview [B, 7, 7, 3072]
+  -> learned 2x2 token unpack [B, 64, 14, 14]
+
+per-frame Depth tokens [B, T, 256]
+  -> learned spatial projection [B, T, 64, 14, 14]
+
+Video grid + Depth grid
+  -> convolutional fusion
+  -> progressive 14 -> 28 -> 56 -> 112 -> 224 decoding
+  -> depth [B, T, 1, 224, 224]
+```
+
+The selected Video tokens are not detached. Depth therefore supervises the
+same final clean-frame spatial representation that supplies Action inference,
+while `infer_action()` still constructs neither Depth tokens nor the decoder.
+The default settings are:
+
+```yaml
+model:
+  auxiliary:
+    depth:
+      output_size: [224, 224]
+      decoder_dim: 64
+      decoder_grid: [14, 14]
+      alpha_grad: 0.5
+```
+
+Changing only `output_size` does not increase intrinsic spatial capacity. Keep
+`decoder_grid` aligned with the learned 14x14 Video-token unpack unless running
+an explicit ablation. Checkpoints produced by the previous 8x8/128x128 Depth
+head can still be deployed with `model.auxiliary.enabled=false`, but they are
+not exact-resume compatible with the new Depth head and optimizer state. Start
+a new auxiliary run, or load only compatible base Video/Action weights.
 
 `configs/model/fastwam.yaml` contains independent `enabled` flags and branch
 settings. The repository default remains the exact baseline:
@@ -644,7 +690,8 @@ Auxiliary evaluation PNGs store the offline label on the left and the module
 decoding on the right. BBox, mask, and trajectory outputs are overlaid on the
 matching RGB agent view. The default saves the first frame only; add
 `eval_auxiliary_save_video=true` to also save full-horizon depth, bbox, and
-mask MP4 files.
+mask MP4 files. Depth label and decoding are now both evaluated at 224x224;
+the display path applies the label's same percentile range to both sides.
 
 `infer_action()` still uses only Video prefill plus cached Video K/V and Action
 denoising. Its inputs and `[action_horizon, action_dim]` output are unchanged;
@@ -791,6 +838,7 @@ or use a system FFmpeg build with AV1 support, such as `libdav1d` or `libaom`.
 - [x] Add four independent Depth/BBox/Mask/Trajectory DiT experts and heads.
 - [x] Add depth, DETR-style bbox, query-mask, and ATM-style trajectory losses.
 - [x] Route auxiliary gradients through clean-frame Video K/V shared with Action.
+- [x] Fuse final first-frame Video spatial tokens into the progressive Depth decoder without increasing MoT token count.
 - [x] Ensure the action branch does not read auxiliary tokens or predictions.
 - [x] Keep deployment action inference unchanged and support Full checkpoints with auxiliaries disabled.
 

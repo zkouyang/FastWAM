@@ -75,6 +75,11 @@ def build_auxiliary_branches(
                 value = branch_cfg.pop(key)
                 if value is not None:
                     kwargs[key] = value
+        if name == "depth":
+            # The depth head consumes final clean-frame Video tokens directly
+            # while keeping its MoT sequence at one query per output frame.
+            branch_cfg.pop("video_hidden_dim", None)
+            kwargs["video_hidden_dim"] = int(video_expert.hidden_dim)
         branch = branch_cls(**kwargs, **branch_cfg)
         if init_from_video:
             branch.initialize_backbone_from_video(video_expert)

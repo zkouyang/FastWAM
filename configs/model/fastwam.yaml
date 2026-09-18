@@ -81,10 +81,12 @@ auxiliary:
     enabled: false
     conditioning_camera_indices: [0]
     init_from_video_dit: false
-    output_size: [128, 128]
-    decoder_dim: 32
-    decoder_grid: [8, 8]
-    alpha_grad: 0.0
+    # Keep one MoT query per frame, then fuse the final 7x7 agentview Video
+    # token grid into a learned 14x14 feature map and progressively decode it.
+    output_size: [224, 224]
+    decoder_dim: 64
+    decoder_grid: [14, 14]
+    alpha_grad: 0.5
   bbox:
     enabled: false
     conditioning_camera_indices: [0]

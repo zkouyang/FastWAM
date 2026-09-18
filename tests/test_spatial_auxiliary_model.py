@@ -225,6 +225,50 @@ def test_auxiliary_attention_reads_agentview_video_tokens_only():
     )
 
 
+def test_depth_spatial_decoder_keeps_one_token_per_frame_and_reads_video_grid():
+    model = build_tiny_model(["depth"])
+    branch = model.get_auxiliary_branch("depth")
+    batch_size = 2
+    num_frames = 5
+    state = branch.pre_dit(
+        batch_size=batch_size,
+        num_frames=num_frames,
+        context=torch.randn(batch_size, 3, 12),
+        context_mask=torch.ones(batch_size, 3, dtype=torch.bool),
+    )
+    assert state["tokens"].shape == (batch_size, num_frames, branch.hidden_dim)
+
+    video_spatial_tokens = torch.randn(
+        batch_size, 2, 3, model.video_expert.hidden_dim, requires_grad=True
+    )
+    prediction = branch.post_dit(
+        state["tokens"],
+        state,
+        video_spatial_tokens=video_spatial_tokens,
+    )
+    assert prediction.shape == (batch_size, num_frames, 1, 8, 8)
+    prediction.square().mean().backward()
+    assert video_spatial_tokens.grad is not None
+    assert torch.count_nonzero(video_spatial_tokens.grad) > 0
+
+
+def test_depth_spatial_decoder_selects_configured_first_frame_camera_grid():
+    model = build_tiny_model(["depth"])
+    model.auxiliary_config["common"]["conditioning_num_cameras"] = 2
+    model.auxiliary_config["depth"]["conditioning_camera_indices"] = [0]
+    # Two frames of a 2x4 token grid. Values 8..15 belong to the second frame
+    # and must never enter the clean first-frame depth decoder condition.
+    video_tokens = torch.arange(16, dtype=torch.float32).view(1, 16, 1)
+    selected = model._select_auxiliary_first_frame_video_tokens(
+        "depth", video_tokens, (2, 2, 4)
+    )
+    assert selected.shape == (1, 2, 2, 1)
+    torch.testing.assert_close(
+        selected[0, ..., 0],
+        torch.tensor([[0.0, 1.0], [4.0, 5.0]]),
+    )
+
+
 def test_auxiliary_only_step_changes_action_through_video_expert():
     model = build_tiny_model(["depth"])
     image = torch.randn(3, 16, 16)

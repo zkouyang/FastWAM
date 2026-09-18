@@ -523,6 +523,59 @@ class FastWAM(torch.nn.Module):
             raise KeyError(f"Auxiliary branch {name!r} is disabled")
         return self.mot.mixtures[name]
 
+    def _select_auxiliary_first_frame_video_tokens(
+        self,
+        name: str,
+        video_tokens: torch.Tensor,
+        video_grid_size: tuple[int, int, int],
+    ) -> torch.Tensor:
+        """Return configured first-frame camera regions as a rectangular grid."""
+
+        if video_tokens.ndim != 3:
+            raise ValueError(f"video_tokens must be [B,S,D], got {tuple(video_tokens.shape)}")
+        frames, grid_h, grid_w = map(int, video_grid_size)
+        if frames * grid_h * grid_w != video_tokens.shape[1]:
+            raise ValueError(
+                "Video grid/token mismatch while selecting auxiliary spatial features: "
+                f"{frames}*{grid_h}*{grid_w} != {video_tokens.shape[1]}"
+            )
+        first_frame = video_tokens[:, : grid_h * grid_w].reshape(
+            video_tokens.shape[0], grid_h, grid_w, video_tokens.shape[-1]
+        )
+        common_cfg = dict(self.auxiliary_config.get("common", {}))
+        branch_cfg = dict(self.auxiliary_config.get(name, {}))
+        camera_indices = branch_cfg.get(
+            "conditioning_camera_indices",
+            common_cfg.get("conditioning_camera_indices"),
+        )
+        if camera_indices is None:
+            return first_frame
+
+        num_cameras = int(
+            branch_cfg.get(
+                "conditioning_num_cameras",
+                common_cfg.get("conditioning_num_cameras", 1),
+            )
+        )
+        if num_cameras <= 0 or grid_w % num_cameras != 0:
+            raise ValueError(
+                f"Video token grid width {grid_w} is not divisible by {num_cameras} cameras"
+            )
+        camera_width = grid_w // num_cameras
+        selected = []
+        for camera_index in camera_indices:
+            camera_index = int(camera_index)
+            if camera_index < 0 or camera_index >= num_cameras:
+                raise ValueError(
+                    f"Auxiliary conditioning camera index {camera_index} is outside "
+                    f"[0, {num_cameras})"
+                )
+            start = camera_index * camera_width
+            selected.append(first_frame[:, :, start : start + camera_width])
+        if not selected:
+            raise ValueError(f"Auxiliary branch {name!r} selected no conditioning cameras")
+        return torch.cat(selected, dim=2)
+
     def _compute_video_loss_per_sample(
         self,
         pred_video: torch.Tensor,
@@ -746,8 +799,15 @@ class FastWAM(torch.nn.Module):
         if use_auxiliary:
             aux_cfg = self.auxiliary_config
             if "depth" in pre_states:
+                depth_video_tokens = self._select_auxiliary_first_frame_video_tokens(
+                    "depth",
+                    tokens_out["video"],
+                    tuple(video_pre["meta"]["grid_size"]),
+                )
                 pred_depth = self.get_auxiliary_branch("depth").post_dit(
-                    tokens_out["depth"], pre_states["depth"]
+                    tokens_out["depth"],
+                    pre_states["depth"],
+                    video_spatial_tokens=depth_video_tokens,
                 )
                 auxiliary_outputs["depth"] = {
                     "prediction": pred_depth,
